@@ -2,7 +2,7 @@
 
 一个运行在 macOS 上的微信消息监控工具：自动抓取指定联系人的聊天记录，调用大模型分析语义并更新 Markdown 人物档案，同时支持智能建议回复。
 
-![状态](https://img.shields.io/badge/status-active-brightgreen) ![Python](https://img.shields.io/badge/python-3.10+-blue) ![平台](https://img.shields.io/badge/platform-macOS-lightgrey)
+![状态](https://img.shields.io/badge/status-active-brightgreen) ![Python](https://img.shields.io/badge/python-3.10+-blue) ![平台](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey)
 
 ## 功能
 
@@ -17,15 +17,20 @@
 
 ### 1. 安装前置依赖
 
+| 平台 | 步骤 |
+|---|---|
+| **macOS** | `brew install python3`（macOS 自带 Python 3 可跳过）→ 启动 macOS 微信客户端并登录 |
+| **Windows** | 装 [Python 3.10+](https://www.python.org/downloads/windows/) → 启动 Windows 微信客户端并登录 |
+
+然后安装 wechat-cli（自动选择你平台的二进制）：
+
 ```bash
-# macOS 自带 Python 3，如果没有就装一个
-brew install python3
-
-# 安装 wechat-cli（这是从微信客户端读取数据用的 CLI）
 npm install -g @canghe_ai/wechat-cli
-
-# 启动 macOS 微信客户端并登录
 ```
+
+> ⚠️ **注意**：`@canghe_ai/wechat-cli` 已被 npm 官方标记为 **DEPRECATED**（弃用状态）。它目前仍能工作，但作者可能停止维护。如果将来这个包失效了，你可能需要自己 fork 一份或者改用其他方案。
+> 
+> ⚠️ **平台支持**：理论上 macOS / Windows 都能跑（wechat-cli 提供了 darwin-arm64、darwin-x64、win32-x64 三种二进制）。作者主要在 macOS 上开发，Windows 用户可能需要自行测试。Linux 没有官方微信客户端，不在支持范围。
 
 > ⚠️ **注意**：`@canghe_ai/wechat-cli` 已被 npm 官方标记为 **DEPRECATED**（弃用状态）。它目前仍能工作，但作者可能停止维护。如果将来这个包失效了，你可能需要自己 fork 一份或者改用其他方案。
 
@@ -45,7 +50,7 @@ python3 main.py
 
 打开浏览器访问 **http://localhost:8643** 即可。
 
-### 3. macOS 启动器（可选）
+### 3. macOS 启动器（可选，macOS 专属）
 
 想要双击图标启动？打开 macOS 自带的"自动操作"App：
 
