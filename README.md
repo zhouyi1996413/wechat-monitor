@@ -13,6 +13,37 @@
 - 🔔 **桌面通知** — 新消息来时弹 macOS 系统通知
 - 🎨 **暗色模式 / 页面缩放** — 面板自带
 
+## 🤖 用 AI Agent 一键安装（推荐）
+
+如果你用 Codex、Claude Code、Cursor、Windsurf 这类带终端权限的 AI 编程助手，可以直接把下面这段发给它，它会帮你跑完所有命令：
+
+```
+帮我安装并启动 https://github.com/zhouyi1996413/wechat-monitor 这个项目：
+
+1. 克隆仓库并进入目录：
+   git clone https://github.com/zhouyi1996413/wechat-monitor.git
+   cd wechat-monitor
+
+2. 安装 wechat-cli（自动选平台二进制）：
+   npm install -g @canghe_ai/wechat-cli
+
+3. 启动面板：
+   python3 main.py
+
+4. 启动后打开浏览器访问 http://localhost:8643
+
+5. 在「设置中心」里：
+   - 填 LLM API 密钥（或设环境变量 LLM_API_KEY）
+   - 填人物档案目录的绝对路径
+   - 点「保存配置」
+
+6. 如果微信客户端没启动，提醒我先启动并登录
+```
+
+**Agent 会自动帮你**：克隆、安装、生成 `config.yaml`、启动服务——你只需要在最后提供 API 密钥和档案目录。
+
+---
+
 ## 快速开始
 
 ### 1. 安装前置依赖
@@ -31,8 +62,6 @@ npm install -g @canghe_ai/wechat-cli
 > ⚠️ **注意**：`@canghe_ai/wechat-cli` 已被 npm 官方标记为 **DEPRECATED**（弃用状态）。它目前仍能工作，但作者可能停止维护。如果将来这个包失效了，你可能需要自己 fork 一份或者改用其他方案。
 > 
 > ⚠️ **平台支持**：理论上 macOS / Windows 都能跑（wechat-cli 提供了 darwin-arm64、darwin-x64、win32-x64 三种二进制）。作者主要在 macOS 上开发，Windows 用户可能需要自行测试。Linux 没有官方微信客户端，不在支持范围。
-
-> ⚠️ **注意**：`@canghe_ai/wechat-cli` 已被 npm 官方标记为 **DEPRECATED**（弃用状态）。它目前仍能工作，但作者可能停止维护。如果将来这个包失效了，你可能需要自己 fork 一份或者改用其他方案。
 
 ### 2. 克隆并启动
 
