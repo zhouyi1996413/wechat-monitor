@@ -1,0 +1,37 @@
+# ===== 微信监控面板 - 配置模板 =====
+# 复制本文件为 config.yaml 并填入你的实际值：
+#   cp config.example.yaml config.yaml
+
+# HTTP 控制面板监听端口
+port: 8643
+
+# 消息监控轮询间隔（秒），最小 15
+poll_interval: 30
+
+# 人物档案（Markdown 文件）存放目录的绝对路径
+# 留空时监控启动后会提示你选择
+profiles_dir: ""
+
+# wechat-cli 二进制路径（可选）
+# 留空时自动按以下顺序查找：环境变量 WECHAT_CLI_PATH > ~/.npm-global/bin/wechat-cli > PATH
+wechat_cli_path: ""
+
+# 排除监控的会话名（公众号、文件传输助手等系统会话）
+exclude_chats:
+  - 公众号
+  - File Transfer
+
+# ===== LLM 配置 =====
+llm:
+  # 接口模式：openai（兼容 OpenAI 格式）或 anthropic
+  mode: openai
+
+  # API 密钥（也可通过环境变量 LLM_API_KEY 注入，密钥本身留空即可）
+  api_key: ""
+  api_key_env: LLM_API_KEY
+
+  # API 地址（去掉尾部斜杠）
+  api_base: "https://api.openai.com/v1"
+
+  # 模型名
+  model: "gpt-4o-mini"
