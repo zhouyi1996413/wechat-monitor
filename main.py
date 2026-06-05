@@ -66,6 +66,15 @@ IDLE_POLL_THRESHOLD = 5            # 连续空轮询次数阈值，之后退避
 LAST_SEEN_DEDUP_WINDOW = 30        # 同联系人去重时间窗口（秒）
 AUTH_TOKEN_FILE = ".auth_token"
 
+def _safe_path(base, *parts):
+    """安全路径拼接：解析后必须仍在 base 下，否则拒绝"""
+    base_real = os.path.realpath(base)
+    target = os.path.realpath(os.path.join(base_real, *parts))
+    if target != base_real and not target.startswith(base_real + os.sep):
+        raise ValueError(f"路径越界: {target}")
+    return target
+
+
 # ===== 3. Logging (before config loading) =====
 _file_logger = logging.getLogger("wechat-monitor")
 _file_logger.setLevel(logging.DEBUG)
@@ -505,7 +514,11 @@ def refresh_all_contacts():
 
 def auto_create_profile(chat_name, username):
     """为没有档案的联系人自动创建简易档案"""
-    filepath = PROFILE_DIR / f"{chat_name}.md"
+    try:
+        filepath = Path(_safe_path(str(PROFILE_DIR), f"{chat_name}.md"))
+    except ValueError as e:
+        log(f"拒绝创建档案（路径越界）: {chat_name} -> {e}", "warn")
+        return None
     if filepath.exists():
         return filepath
 
@@ -1452,8 +1465,12 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/profile":
             pname = qs.get("name", [""])[0]
             if pname:
-                # 直接在档案目录查找，不走 get_profile_for_chat 避免锁竞争
-                md_file = PROFILE_DIR / (pname + ".md")
+                # 防止路径穿越：规范化后必须仍在 PROFILE_DIR 下
+                try:
+                    md_file = Path(_safe_path(str(PROFILE_DIR), pname + ".md"))
+                except ValueError:
+                    self._json({"name": pname, "content": "", "exists": False, "error": "invalid name"})
+                    return
                 if md_file.exists():
                     self._json({"name": pname, "content": md_file.read_text(encoding="utf-8"), "exists": True})
                 else:
