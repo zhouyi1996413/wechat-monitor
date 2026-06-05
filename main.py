@@ -119,8 +119,7 @@ def load_config():
         if os.path.exists(example):
             import shutil
             shutil.copy(example, CONFIG_FILE)
-            print(f"[INFO] 📋 已从 config.example.yaml 复制默认配置到 {CONFIG_FILE}")
-            print(f"[WARN] ⚠️  请打开 config.yaml 填入你的 LLM API 密钥和人物档案目录路径")
+            print(f"[INFO] 📋 已生成默认配置 {CONFIG_FILE}，请在 Web 面板的「设置中心」中填写")
         else:
             print(f"[ERROR] ❌ 找不到配置文件: {CONFIG_FILE}")
             print(f"[ERROR] 也找不到 config.example.yaml，请重新 clone 项目")
