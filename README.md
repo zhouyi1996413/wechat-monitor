@@ -34,10 +34,14 @@ npm install -g @canghe_ai/wechat-cli
 ```bash
 git clone https://github.com/zhouyi1996413/wechat-monitor.git
 cd wechat-monitor
-cp config.example.yaml config.yaml
-# 编辑 config.yaml，填上你的 LLM API 密钥和人物档案目录路径
 python3 main.py
 ```
+
+**首次启动会自动**：
+- 把 `config.example.yaml` 复制成 `config.yaml`（你不用手动 copy）
+- 在终端打印一行警告提醒你编辑 `config.yaml` 填入 LLM API 密钥和人物档案目录
+
+填好之后再次 `python3 main.py` 就能正常工作了。
 
 打开浏览器访问 **http://localhost:8643** 即可。
 

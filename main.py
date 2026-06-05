@@ -113,13 +113,20 @@ if not WATCHDOG_AVAILABLE:
 
 # ===== 4. Config Loading =====
 def load_config():
-    """读取 config.yaml，没有则报错（启动阶段用 print 而非 log）"""
+    """读取 config.yaml，没有则从 config.example.yaml 复制一份"""
     if not os.path.exists(CONFIG_FILE):
-        print(f"[ERROR] ❌ 找不到配置文件: {CONFIG_FILE}")
-        print("[ERROR] 请复制 config.yaml 到脚本同目录后修改")
-        raise SystemExit(1)
+        example = os.path.join(SCRIPT_DIR, "config.example.yaml")
+        if os.path.exists(example):
+            import shutil
+            shutil.copy(example, CONFIG_FILE)
+            print(f"[INFO] 📋 已从 config.example.yaml 复制默认配置到 {CONFIG_FILE}")
+            print(f"[WARN] ⚠️  请打开 config.yaml 填入你的 LLM API 密钥和人物档案目录路径")
+        else:
+            print(f"[ERROR] ❌ 找不到配置文件: {CONFIG_FILE}")
+            print(f"[ERROR] 也找不到 config.example.yaml，请重新 clone 项目")
+            raise SystemExit(1)
     with open(CONFIG_FILE, encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+        cfg = yaml.safe_load(f) or {}
 
     llm = cfg.get("llm", {})
     api_key = llm.get("api_key", "") or os.environ.get(
