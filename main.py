@@ -239,6 +239,8 @@ all_contacts_cache = []        # 所有微信联系人缓存
 message_cache = {}             # 最近消息缓存 {chat_name: [messages]}
 message_counts = {}            # 消息计数 {chat_name: count}
 last_seen = {}                 # 去重时间戳 {username_chat: timestamp}
+manual_accounts = {}           # 用户手动添加的账号 {contact_name: [{username, chat, label}]}
+account_labels = {}              # 给自动/alias 账号加的显示名 {contact_name: {username: label}}
 today_updates = 0              # 今日更新计数
 today_updates_date = ""        # 记录计数对应的日期
 
@@ -331,6 +333,13 @@ def load_state():
                 poll_interval = POLL_INTERVAL_MIN
             last_seen = data.get("last_seen", {})
             message_counts.update(data.get("message_counts", {}))
+            with _state_lock:
+                ma = data.get("manual_accounts", {})
+                manual_accounts.clear()
+                manual_accounts.update(ma)
+                al = data.get("account_labels", {})
+                account_labels.clear()
+                account_labels.update(al)
             return data
         except Exception:
             pass
@@ -352,6 +361,8 @@ def save_state(state=None):
         data["manual_contacts"] = list(
             monitored_contacts - set(profile_names)
         )
+        data["manual_accounts"] = {k: list(v) for k, v in manual_accounts.items()}
+        data["account_labels"] = {k: dict(v) for k, v in account_labels.items()}
         data["last_poll_time"] = time.time()
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     with open(STATE_FILE, "w") as f:
@@ -480,7 +491,7 @@ def refresh_all_contacts():
             return
         old_cache = list(all_contacts_cache)
         output = run_cmd(
-            ["wechat-cli", "sessions", "--limit", "30"], timeout=15, lock_timeout=5
+            ["wechat-cli", "sessions", "--limit", "500"], timeout=15, lock_timeout=5
         )
         new_cache = []
         if output:
@@ -1410,6 +1421,54 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
             self._json({"token": API_TOKEN})
 
         elif path == "/api/status":
+            from collections import defaultdict
+            _accts = defaultdict(dict)
+            _hidden_by_contact = {}  # chat_name -> {username: {chat, is_primary}}
+            _SKIP_USERS = {"qqmail", "brandservicesessionholder", "brandsessionholder"}
+            _uname_to_chat = {c.get("username",""): c.get("chat","") for c in all_contacts_cache if c.get("username")}
+            for _chat_name in monitored_contacts:
+                if len(_chat_name) < 2:
+                    continue
+                # 1) 缓存里的 chat 前缀/精确匹配
+                for _c in all_contacts_cache:
+                    _other = _c.get("chat", "")
+                    _uname = _c.get("username", "")
+                    if not _uname or _c.get("is_group"):
+                        continue
+                    if str(_uname).startswith("gh_") or _uname in _SKIP_USERS:
+                        continue
+                    if _other == _chat_name or _other.startswith(_chat_name):
+                        if _uname not in _accts[_chat_name]:
+                            _accts[_chat_name][_uname] = {"chat": _other, "is_primary": _other == _chat_name}
+                # 2) 档案 alias 兜底（解决"档案里写了小号 wxid 但 sessions 缓存里没拉到"的问题）
+                _md = identifier_to_profile.get(_chat_name)
+                if _md and _md in profile_identifiers:
+                    for _alias in profile_identifiers[_md]:
+                        if not _alias or _alias == _chat_name:
+                            continue
+                        # _alias 可能是 username（wxid_xxx / your_username）或小号 chat 名
+                        if _alias in _uname_to_chat:
+                            _chat = _uname_to_chat[_alias]
+                            if _alias not in _accts[_chat_name]:
+                                _accts[_chat_name][_alias] = {"chat": _chat, "is_primary": _chat == _chat_name}
+                        elif str(_alias).startswith("wxid_") or (re.match(r'^[A-Za-z][A-Za-z0-9_]{5,}$', str(_alias)) and len(str(_alias)) >= 6):
+                            # 像 username 但缓存里没找到，依然显示（标记非主号）
+                            if _alias not in _accts[_chat_name]:
+                                _accts[_chat_name][_alias] = {"chat": _alias, "is_primary": False}
+                # 3) 用户手动添加的账号（最高优先级，永远显示）
+                for _entry in manual_accounts.get(_chat_name, []):
+                    _u = _entry.get("username", "")
+                    if not _u:
+                        continue
+                    if _entry.get("source") == "hidden":
+                        _hidden_by_contact.setdefault(_chat_name, set()).add(_u)
+                        continue
+                    if _u not in _accts[_chat_name]:
+                        _accts[_chat_name][_u] = {
+                            "chat": _entry.get("chat", _u),
+                            "is_primary": _entry.get("is_primary", False),
+                        }
+            contact_accounts = {k: [{"username": u, "chat": v["chat"], "is_primary": v["is_primary"], "label": account_labels.get(k, {}).get(u, "")} for u, v in vs.items() if u not in _hidden_by_contact.get(k, set())] for k, vs in _accts.items()}
             self._json({
                 "running": monitor_running,
                 "monitored_count": len(monitored_contacts),
@@ -1420,6 +1479,7 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
                 "running_time": _get_running_time(),
                 "logs": recent_logs[-30:],
                 "alias_map": {str(k): list(v) for k, v in profile_identifiers.items()},
+                "contact_accounts": contact_accounts,
             })
 
         elif path == "/api/events":
@@ -1489,8 +1549,153 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
                 self._json({"error": "name required"}, 400)
 
 
+        elif path == "/api/contact_accounts":
+            # GET  ?contact=xxx  -> 列出该联系人的所有账号（自动 + 手动合并）
+            # POST {action:"add", contact, username, chat?, label?, is_primary?}
+            #      {action:"remove", contact, username}
+            #      {action:"set_primary", contact, username}
+            #      {action:"rename", contact, username, label}
+            if self.command == "GET":
+                _name = qs.get("contact", [""])[0]
+                if not _name:
+                    self._json({"error": "contact required"}, 400)
+                    return
+                # 复用 /api/status 的聚合逻辑
+                from collections import defaultdict
+                _accts = defaultdict(dict)
+                _SKIP = {"qqmail", "brandservicesessionholder", "brandsessionholder"}
+                _uname_to_chat = {c.get("username", ""): c.get("chat", "") for c in all_contacts_cache if c.get("username")}
+                for _c in all_contacts_cache:
+                    _other = _c.get("chat", "")
+                    _uname = _c.get("username", "")
+                    if not _uname or _c.get("is_group"):
+                        continue
+                    if str(_uname).startswith("gh_") or _uname in _SKIP:
+                        continue
+                    if _other == _name or _other.startswith(_name):
+                        _accts[_uname] = {"chat": _other, "source": "auto", "is_primary": _other == _name, "label": ""}
+                _md = identifier_to_profile.get(_name)
+                if _md and _md in profile_identifiers:
+                    for _alias in profile_identifiers[_md]:
+                        if not _alias or _alias == _name:
+                            continue
+                        if _alias in _uname_to_chat:
+                            _chat = _uname_to_chat[_alias]
+                            if _alias not in _accts:
+                                _accts[_alias] = {"chat": _chat, "source": "alias", "is_primary": _chat == _name, "label": ""}
+                        elif str(_alias).startswith("wxid_") or (re.match(r"^[A-Za-z][A-Za-z0-9_]{5,}$", str(_alias)) and len(str(_alias)) >= 6):
+                            if _alias not in _accts:
+                                _accts[_alias] = {"chat": _alias, "source": "alias", "is_primary": False, "label": ""}
+                for _e in manual_accounts.get(_name, []):
+                    _u = _e.get("username", "")
+                    if _u and _u not in _accts:
+                        _accts[_u] = {"chat": _e.get("chat", _u), "source": "manual", "is_primary": _e.get("is_primary", False), "label": _e.get("label", "")}
+                # 合并独立保存的 label（给自动/alias 账号用的）
+                _labels = account_labels.get(_name, {})
+                for _u, _lbl in _labels.items():
+                    if _u in _accts and _lbl:
+                        _accts[_u]["label"] = _lbl
+                # 过滤掉被"隐藏"的自动/alias 账号（manual_accounts 里 source="hidden" 的）
+                _hidden_usernames = {e.get("username") for e in manual_accounts.get(_name, []) if e.get("source") == "hidden"}
+                result = [{"username": u, "chat": v["chat"], "source": v["source"], "is_primary": v["is_primary"], "label": v["label"]} for u, v in _accts.items() if u not in _hidden_usernames]
+                result.sort(key=lambda x: (not x["is_primary"], x["source"] == "auto", x["username"]))
+                self._json({"contact": _name, "accounts": result})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length)) if length else {}
+            except Exception:
+                self._json({"error": "invalid json"}, 400)
+                return
+            _contact = (body.get("contact") or "").strip()
+            _username = (body.get("username") or "").strip()
+            _action = body.get("action", "add")
+            if not _contact or not _username:
+                self._json({"error": "contact and username required"}, 400)
+                return
+            with _state_lock:
+                _lst = list(manual_accounts.get(_contact, []))
+                if _action == "add":
+                    # 校验：如果是 username 格式（wxid_ / 纯英文数字下划线 >=6）直接接受
+                    # 如果是 chat 名（中文 / 其他），尝试在缓存里查
+                    _chat = body.get("chat", "").strip()
+                    if not _chat:
+                        # 尝试在缓存里通过 username 反查
+                        for _c in all_contacts_cache:
+                            if _c.get("username") == _username:
+                                _chat = _c.get("chat", _username)
+                                break
+                        if not _chat:
+                            _chat = _username
+                    _is_primary = bool(body.get("is_primary", False))
+                    _label = (body.get("label") or "").strip()
+                    # 去重
+                    _lst = [e for e in _lst if e.get("username") != _username]
+                    _lst.append({"username": _username, "chat": _chat, "is_primary": _is_primary, "label": _label})
+                    if _is_primary:
+                        for e in _lst:
+                            if e.get("username") != _username:
+                                e["is_primary"] = False
+                    manual_accounts[_contact] = _lst
+                elif _action == "remove":
+                    _lst = [e for e in _lst if e.get("username") != _username]
+                    if _lst:
+                        manual_accounts[_contact] = _lst
+                    else:
+                        manual_accounts.pop(_contact, None)
+                elif _action == "set_primary":
+                    for e in _lst:
+                        e["is_primary"] = (e.get("username") == _username)
+                    manual_accounts[_contact] = _lst
+                elif _action == "set_label":
+                    # 给任意账号设置显示名（独立于 manual_accounts）
+                    with _state_lock:
+                        if not _label.strip():
+                            if _contact in account_labels and _username in account_labels[_contact]:
+                                del account_labels[_contact][_username]
+                                if not account_labels[_contact]:
+                                    del account_labels[_contact]
+                        else:
+                            account_labels.setdefault(_contact, {})[_username] = _label.strip()
+                    save_state()
+                    self._json({"ok": True, "contact": _contact, "username": _username, "label": _label.strip()})
+                    return
+                elif _action == "hide":
+                    # 隐藏一个 auto/alias 账号（用 source="hidden" 标记）
+                    with _state_lock:
+                        _lst = list(manual_accounts.get(_contact, []))
+                        _lst = [e for e in _lst if e.get("username") != _username]
+                        _lst.append({"username": _username, "source": "hidden", "is_primary": False, "label": ""})
+                        manual_accounts[_contact] = _lst
+                    save_state()
+                    self._json({"ok": True, "contact": _contact, "username": _username, "hidden": True})
+                    return
+                elif _action == "unhide":
+                    # 取消隐藏（移除 hidden 标记）
+                    with _state_lock:
+                        _lst = list(manual_accounts.get(_contact, []))
+                        _lst = [e for e in _lst if not (e.get("username") == _username and e.get("source") == "hidden")]
+                        if _lst:
+                            manual_accounts[_contact] = _lst
+                        else:
+                            manual_accounts.pop(_contact, None)
+                    save_state()
+                    self._json({"ok": True, "contact": _contact, "username": _username, "hidden": False})
+                    return
+                elif _action == "rename":
+                    for e in _lst:
+                        if e.get("username") == _username:
+                            e["label"] = (body.get("label") or "").strip()
+                            break
+                    manual_accounts[_contact] = _lst
+                else:
+                    self._json({"error": "unknown action"}, 400)
+                    return
+            save_state()
+            self._json({"ok": True, "contact": _contact, "accounts": manual_accounts.get(_contact, [])})
+
+
         elif path == "/api/contacts":
-            global all_contacts_cache
             if not all_contacts_cache:
                 refresh_all_contacts()
             monitored = set(monitored_contacts)
@@ -1636,11 +1841,113 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
             log(f"⏱ 轮询间隔已改为 {val} 秒")
             self._json({"success": True, "interval": val})
 
-        elif path == "/api/add-contact":
+        elif path == "/api/contact_accounts":
             body = _read_body()
             if body is None:
                 return
-            chat = body.get("chat", "")
+            _contact = (body.get("contact") or "").strip()
+            _username = (body.get("username") or "").strip()
+            _action = body.get("action", "add")
+            if not _contact or not _username:
+                self._json({"error": "contact and username required"}, 400)
+                return
+            if _action == "set_label":
+                _label = (body.get("label") or "").strip()
+                with _state_lock:
+                    if not _label:
+                        if _contact in account_labels and _username in account_labels[_contact]:
+                            del account_labels[_contact][_username]
+                            if not account_labels[_contact]:
+                                del account_labels[_contact]
+                    else:
+                        account_labels.setdefault(_contact, {})[_username] = _label
+                save_state()
+                self._json({"ok": True, "contact": _contact, "username": _username, "label": _label})
+                return
+            if _action == "hide":
+                with _state_lock:
+                    _lst = list(manual_accounts.get(_contact, []))
+                    _lst = [e for e in _lst if e.get("username") != _username]
+                    _lst.append({"username": _username, "source": "hidden", "is_primary": False, "label": ""})
+                    manual_accounts[_contact] = _lst
+                save_state()
+                self._json({"ok": True, "contact": _contact, "username": _username, "hidden": True})
+                return
+            if _action == "unhide":
+                with _state_lock:
+                    _lst = list(manual_accounts.get(_contact, []))
+                    _lst = [e for e in _lst if not (e.get("username") == _username and e.get("source") == "hidden")]
+                    if _lst:
+                        manual_accounts[_contact] = _lst
+                    else:
+                        manual_accounts.pop(_contact, None)
+                save_state()
+                self._json({"ok": True, "contact": _contact, "username": _username, "hidden": False})
+                return
+            with _state_lock:
+                _lst = list(manual_accounts.get(_contact, []))
+                if _action == "add":
+                    _chat = (body.get("chat") or "").strip()
+                    if not _chat:
+                        for _c in all_contacts_cache:
+                            if _c.get("username") == _username:
+                                _chat = _c.get("chat", _username)
+                                break
+                        if not _chat:
+                            _chat = _username
+                    _is_primary = bool(body.get("is_primary", False))
+                    _label = (body.get("label") or "").strip()
+                    _lst = [e for e in _lst if e.get("username") != _username]
+                    _lst.append({"username": _username, "chat": _chat, "is_primary": _is_primary, "label": _label})
+                    if _is_primary:
+                        for e in _lst:
+                            if e.get("username") != _username:
+                                e["is_primary"] = False
+                    manual_accounts[_contact] = _lst
+                elif _action == "remove":
+                    _lst = [e for e in _lst if e.get("username") != _username]
+                    if _lst:
+                        manual_accounts[_contact] = _lst
+                    else:
+                        manual_accounts.pop(_contact, None)
+                elif _action == "set_primary":
+                    for e in _lst:
+                        e["is_primary"] = (e.get("username") == _username)
+                    manual_accounts[_contact] = _lst
+                elif _action == "rename":
+                    for e in _lst:
+                        if e.get("username") == _username:
+                            e["label"] = (body.get("label") or "").strip()
+                            break
+                    manual_accounts[_contact] = _lst
+                else:
+                    self._json({"error": "unknown action"}, 400)
+                    return
+            save_state()
+            self._json({"ok": True, "contact": _contact, "accounts": manual_accounts.get(_contact, [])})
+
+        elif path == "/api/set-account-label":
+            body = _read_body()
+            if body is None:
+                return
+            _contact = (body.get("contact") or "").strip()
+            _username = (body.get("username") or "").strip()
+            _label = (body.get("label") or "").strip()
+            if not _contact or not _username:
+                self._json({"error": "contact and username required"}, 400)
+                return
+            with _state_lock:
+                if not _label:
+                    if _contact in account_labels and _username in account_labels[_contact]:
+                        del account_labels[_contact][_username]
+                        if not account_labels[_contact]:
+                            del account_labels[_contact]
+                else:
+                    account_labels.setdefault(_contact, {})[_username] = _label
+            save_state()
+            self._json({"ok": True, "contact": _contact, "username": _username, "label": _label})
+
+        elif path == "/api/add-contact":
             if not chat:
                 self._json({"error": "missing chat"}, 400)
                 return
@@ -1761,740 +2068,9 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
 
 
 # ===== 16. HTML Template =====
-HTML_PAGE = r"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>微信监控面板</title>
-<script>
-(function(){var t=localStorage.getItem("theme")||(window.matchMedia("(prefers-color-scheme:dark)").matches?"dark":"light");document.documentElement.setAttribute("data-theme",t)})();
-</script>
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-:root{--bg:#f4f7fc;--card:rgba(255,255,255,.78);--line:#e8edf5;--p1:#7b61ff;--p2:#5d86ff;--txt:#1f2937;--muted:#94a3b8;--input-bg:#f7f9fd;--glass-border:rgba(255,255,255,.9);--glass-shadow:rgba(30,41,59,.08);--modal-bg:#fff;--cancel-bg:#f5f5f8;--tag-bg:rgba(123,97,255,.08);--suggest-bg:rgba(123,97,255,.04);--suggest-border:rgba(123,97,255,.1)}
-[data-theme="dark"]{--bg:#0f172a;--card:rgba(30,41,59,.85);--line:rgba(255,255,255,.07);--txt:#e2e8f0;--muted:#64748b;--input-bg:rgba(255,255,255,.05);--glass-border:rgba(255,255,255,.08);--glass-shadow:rgba(0,0,0,.35);--modal-bg:#1e293b;--cancel-bg:rgba(255,255,255,.06);--tag-bg:rgba(123,97,255,.15);--suggest-bg:rgba(123,97,255,.08);--suggest-border:rgba(123,97,255,.15)}
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Inter',-apple-system,PingFang SC,sans-serif;color:var(--txt);background:var(--bg);min-height:100vh}
-body{transition:background .3s}
-body:before,body:after{content:"";position:fixed;border-radius:50%;filter:blur(100px);pointer-events:none;z-index:-1;transition:background .3s}
-body:before{width:420px;height:420px;left:-120px;top:-120px;background:rgba(123,97,255,.12)}
-body:after{width:320px;height:320px;right:-80px;top:60px;background:rgba(93,134,255,.1)}
-.wrap{max-width:1600px;margin:auto;padding:24px}
-.glass{background:var(--card);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid var(--glass-border);box-shadow:0 20px 60px var(--glass-shadow);border-radius:30px;transition:background .3s,border-color .3s,box-shadow .3s}
-.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}
-.brand{display:flex;gap:18px;align-items:center}
-.logo{width:64px;height:64px;border-radius:20px;background:linear-gradient(135deg,var(--p1),var(--p2));position:relative;flex-shrink:0}
-.logo:before,.logo:after{content:"";position:absolute;background:#fff;border-radius:50%}
-.logo:before{width:24px;height:24px;left:14px;top:20px}
-.logo:after{width:18px;height:18px;right:12px;top:12px}
-.top-title{font-size:34px;font-weight:700}
-.top-sub{color:var(--muted);font-size:14px;margin-top:2px}
-.gear{width:56px;height:56px;display:flex;align-items:center;justify-content:center;font-size:22px;cursor:pointer;transition:transform .2s}
-.gear:hover{transform:rotate(30deg)}
-.status-bar{padding:18px 28px;display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
-.status-left{display:flex;gap:12px;align-items:center}
-.dot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
-.dot.on{background:#3ccf6e;box-shadow:0 0 10px rgba(60,207,110,.45)}
-.dot.off{background:#f87171;box-shadow:0 0 10px rgba(248,113,113,.35)}
-.status-text{font-size:15px;font-weight:600}
-.status-sub{color:var(--muted);font-size:13px}
-.btn{padding:10px 24px;border-radius:14px;border:none;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:all .2s}
-.btn:disabled{opacity:.35;cursor:not-allowed}
-.btn-start{background:linear-gradient(135deg,#3ccf6e,#28b855);color:#fff}
-.btn-start:hover:not(:disabled){box-shadow:0 6px 20px rgba(60,207,110,.3)}
-.btn-stop{background:linear-gradient(135deg,#ff6b6b,#ee5a24);color:#fff}
-.btn-stop:hover:not(:disabled){box-shadow:0 6px 20px rgba(255,107,107,.3)}
-:root{--settings-w:320px}
-.layout{display:grid;grid-template-columns:var(--contacts-w) 1fr var(--settings-w);gap:22px;min-height:860px;transition:grid-template-columns .35s cubic-bezier(.4,0,.2,1)}
-:root{--contacts-w:370px}
-.panel{padding:24px;display:flex;flex-direction:column}
-.panel h2{font-size:17px;font-weight:700;margin-bottom:14px}
-.search{width:100%;height:48px;border:none;background:var(--input-bg);border-radius:14px;padding:0 16px;font-size:13px;font-family:inherit;outline:none;transition:box-shadow .2s;margin-bottom:10px}
-.search:focus{box-shadow:0 0 0 2px rgba(123,97,255,.25)}
-.search::placeholder{color:#B0B8C9}
-.contact-list{flex:1;overflow-y:auto;min-height:0}
-.contact-list::-webkit-scrollbar{width:3px}
-.contact-list::-webkit-scrollbar-thumb{background:rgba(123,97,255,.15);border-radius:2px}
-.contact{display:flex;justify-content:space-between;align-items:center;padding:14px 0;border-bottom:1px solid var(--line)}
-.contact:last-child{border-bottom:none}
-.contact-info{display:flex;gap:12px;align-items:center;min-width:0;flex:1}
-.avatar{width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:16px;flex-shrink:0}
-.contact-name{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.contact-meta{display:flex;gap:5px;margin-top:3px;flex-wrap:wrap}
-.badge{font-size:11px;padding:3px 8px;border-radius:999px;font-weight:500}
-.badge-profile{background:#eef3ff;color:#5a67ff}
-.badge-manual{background:#f3f4f8;color:#6b7280}
-.badge-alias{background:#f1e8ff;color:#7b61ff}
-.contact-acts{display:flex;gap:6px;flex-shrink:0}
-.btn-sm{padding:6px 12px;border-radius:8px;border:none;cursor:pointer;font-size:12px;font-weight:500;font-family:inherit;transition:all .15s;display:flex;align-items:center;gap:4px}
-.btn-analyze{background:transparent;color:var(--p1);border:1px solid rgba(123,97,255,.2)}
-.btn-analyze:hover{background:rgba(123,97,255,.06);border-color:rgba(123,97,255,.35)}
-.btn-rm{background:none;border:none;cursor:pointer;color:#B0B8C9;padding:6px;border-radius:6px;font-size:14px;transition:all .15s}
-.btn-rm:hover{color:#ff6b6b;background:rgba(255,107,107,.06)}
-.btn-add{margin-top:12px;height:44px;border:1.5px dashed #d4d7e0;background:transparent;border-radius:12px;cursor:pointer;font-size:13px;font-weight:500;color:var(--p1);font-family:inherit;transition:all .2s}
-.btn-add:hover{border-color:var(--p1);background:rgba(123,97,255,.03)}
-.empty{text-align:center;color:#B0B8C9;padding:28px 0;font-size:13px}
-.main-col{display:flex;flex-direction:column;gap:18px}
-.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
-.stat{padding:22px;position:relative;overflow:hidden}
-.stat-title{font-size:13px;color:var(--muted);font-weight:500;margin-bottom:8px}
-.stat-big{font-size:42px;font-weight:700;color:var(--p1);line-height:1}
-.poll,.logs-card{padding:22px}
-.poll h3,.logs-card h3{font-size:15px;font-weight:700;margin-bottom:10px}
-.poll-sub{font-size:13px;color:var(--muted);margin-bottom:12px}
-.interval-row{display:flex;align-items:center;gap:12px}
-.interval-input{height:46px;background:var(--input-bg);border:1px solid var(--line);border-radius:12px;color:var(--txt);padding:0 14px;font-size:16px;font-weight:600;width:72px;text-align:center;outline:none;font-family:inherit;transition:border-color .2s}
-.interval-input:focus{border-color:var(--p1)}
-.interval-unit{color:var(--muted);font-size:13px}
-.logs-card{flex:1;display:flex;flex-direction:column}
-.log-scroll{flex:1;overflow-y:auto;max-height:380px}
-.log-scroll::-webkit-scrollbar{width:3px}
-.log-scroll::-webkit-scrollbar-thumb{background:rgba(123,97,255,.15);border-radius:2px}
-.log{display:grid;grid-template-columns:72px 56px 1fr;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);font-size:12px;align-items:baseline}
-.log:last-child{border-bottom:none}
-.log-time{color:#B0B8C9;font-family:'SF Mono','Fira Code',monospace;font-size:11px}
-.log-level{padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600;text-align:center}
-.log-level.INFO{background:rgba(123,97,255,.1);color:var(--p1)}
-.log-level.WARN{background:rgba(251,191,36,.12);color:#d97706}
-.log-level.ERROR{background:rgba(248,113,113,.1);color:#ef4444}
-.log-msg{color:#6b7280;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* Settings collapsible */
-.settings-col{position:relative;transition:all .35s cubic-bezier(.4,0,.2,1)}
-.settings-col .settings-panel{transition:opacity .25s,transform .25s}
-.settings-col.collapsed .settings-panel{opacity:0;pointer-events:none;transform:translateX(16px);position:absolute;inset:0;padding:24px}
-.settings-toggle{position:absolute;left:0;top:0;bottom:0;width:48px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;cursor:pointer;background:var(--card);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid var(--glass-border);border-radius:30px 0 0 30px;z-index:5;transition:background .2s}
-.settings-toggle:hover{background:rgba(123,97,255,.08)}
-.settings-toggle svg{width:18px;height:18px;color:var(--muted);transition:color .2s}
-.settings-toggle:hover svg{color:var(--p1)}
-.settings-toggle span{writing-mode:vertical-rl;text-orientation:mixed;font-size:12px;color:var(--muted);letter-spacing:1px}
-.settings-col.collapsed{width:48px;min-width:48px}
-.contacts-col{position:relative;display:flex;flex-direction:column;transition:all .35s cubic-bezier(.4,0,.2,1)}
-.contacts-col .panel{flex:1;min-height:0;transition:opacity .25s,transform .25s}
-.contacts-col.collapsed .panel{opacity:0;pointer-events:none;transform:translateX(-16px)}
-.contacts-toggle{position:absolute;right:0;top:0;bottom:0;width:48px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;cursor:pointer;background:var(--card);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border:1px solid var(--glass-border);border-radius:0 30px 30px 0;z-index:5;transition:background .2s}
-.contacts-toggle:hover{background:rgba(123,97,255,.08)}
-.contacts-toggle svg{width:18px;height:18px;color:var(--muted);transition:color .2s}
-.contacts-toggle:hover svg{color:var(--p1)}
-.contacts-toggle span{writing-mode:vertical-rl;text-orientation:mixed;font-size:12px;color:var(--muted);letter-spacing:1px}
-.contacts-col.collapsed{width:48px;min-width:48px}
-.contacts-col:not(.collapsed) .contacts-toggle{opacity:0;pointer-events:none;width:0}
-.settings-col:not(.collapsed) .settings-toggle{opacity:0;pointer-events:none;width:0}
-.collapse-btn{width:32px;height:32px;border:none;background:transparent;border-radius:8px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--muted);transition:background .2s,color .2s}
-.collapse-btn:hover{background:rgba(123,97,255,.1);color:var(--p1)}
-/* Zoom slider */
-.zoom-row{display:flex;align-items:center;gap:10px;margin:8px 0 16px}
-.zoom-row input[type=range]{flex:1;-webkit-appearance:none;height:6px;border-radius:3px;background:var(--line);outline:none}
-.zoom-row input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:linear-gradient(135deg,var(--p1),var(--p2));cursor:pointer;box-shadow:0 2px 6px rgba(123,97,255,.3)}
-.zoom-val{font-size:13px;font-weight:600;color:var(--p1);min-width:36px;text-align:right}
-/* Notification toggle */
-.toggle-row{display:flex;align-items:center;gap:10px;margin:8px 0 16px}
-.toggle-switch{position:relative;width:44px;height:24px;flex-shrink:0}
-.toggle-switch input{opacity:0;width:0;height:0}
-.toggle-track{position:absolute;inset:0;background:var(--line);border-radius:12px;cursor:pointer;transition:background .2s}
-.toggle-track::after{content:"";position:absolute;left:2px;top:2px;width:20px;height:20px;background:#fff;border-radius:50%;transition:transform .2s;box-shadow:0 1px 3px rgba(0,0,0,.15)}
-.toggle-switch input:checked+.toggle-track{background:var(--p1)}
-.toggle-switch input:checked+.toggle-track::after{transform:translateX(20px)}
-.toggle-label{font-size:13px;color:var(--txt)}
-/* Exclude chips */
-.chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
-.chip{display:flex;align-items:center;gap:4px;padding:4px 10px;border-radius:8px;background:rgba(248,113,113,.08);color:#ef4444;font-size:12px;font-weight:500}
-.chip-x{cursor:pointer;opacity:.6;font-size:14px;line-height:1}.chip-x:hover{opacity:1}
-.chip-input{display:flex;gap:6px;margin-bottom:16px}
-.chip-input input{flex:1;height:38px;border:1px solid var(--line);background:var(--input-bg);border-radius:10px;padding:0 12px;font-size:13px;font-family:inherit;color:var(--txt);outline:none}
-.chip-input button{height:38px;padding:0 14px;border:none;border-radius:10px;background:var(--p1);color:#fff;font-size:13px;font-weight:500;cursor:pointer;font-family:inherit}
-/* Profile modal */
-.prof-md{font-size:14px;line-height:1.7;color:var(--txt);white-space:pre-wrap;word-break:break-word}
-.prof-md b{color:var(--p1)}
-.prof-md hr{border:none;border-top:1px solid var(--line);margin:12px 0}
-.settings-panel{padding:24px}
-.settings-panel h2{font-size:17px;font-weight:700;margin-bottom:18px}
-.settings-panel label{display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:5px;text-transform:uppercase;letter-spacing:.3px}
-.settings-panel input,.settings-panel select{width:100%;height:42px;border:1px solid var(--line);background:var(--input-bg);border-radius:12px;padding:0 12px;font-size:13px;font-family:inherit;color:var(--txt);outline:none;transition:border-color .2s;margin-bottom:12px}
-.settings-panel input:focus,.settings-panel select:focus{border-color:var(--p1)}
-.settings-panel select{cursor:pointer}
-.btn-fetch-models{display:flex;align-items:center;gap:6px;height:42px;padding:0 14px;border:1px solid var(--line);background:var(--input-bg);border-radius:12px;font-size:12px;font-weight:500;color:var(--muted);cursor:pointer;font-family:inherit;transition:all .2s;flex-shrink:0;white-space:nowrap}
-.btn-fetch-models:hover:not(:disabled){border-color:var(--p1);color:var(--p1);background:rgba(123,97,255,.06)}
-.btn-fetch-models:disabled{opacity:.5;cursor:not-allowed}
-.btn-fetch-models.loading svg{animation:spin 1s linear infinite}
-@keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
-.btn-save{height:46px;border:none;border-radius:14px;background:linear-gradient(135deg,var(--p1),var(--p2));color:#fff;font-size:14px;font-weight:600;font-family:inherit;cursor:pointer;transition:all .2s;margin-top:6px;width:100%;box-shadow:0 4px 14px rgba(123,97,255,.2)}
-.btn-save:hover{box-shadow:0 6px 20px rgba(123,97,255,.3);transform:translateY(-1px)}
-.btn-save:active{transform:translateY(0)}
-.save-fb{font-size:12px;color:#3ccf6e;margin-top:8px;text-align:center;min-height:18px}
-.modal-mask{display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:100;justify-content:center;align-items:center;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px)}
-.modal-mask.open{display:flex}
-.modal-box{background:var(--modal-bg);border-radius:22px;padding:28px;width:500px;max-width:92vw;box-shadow:0 24px 64px rgba(0,0,0,.18)}
-.modal-box h3{font-size:18px;font-weight:700;margin-bottom:16px}
-.modal-box label{color:var(--muted);font-size:12px;display:block;margin-bottom:5px;font-weight:500}
-.modal-box input{width:100%;padding:10px 14px;border-radius:10px;background:var(--input-bg);color:var(--txt);border:1px solid var(--line);font-size:13px;font-family:inherit;outline:none;transition:border-color .2s}
-.modal-box input:focus{border-color:var(--p1)}
-.modal-foot{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
-.btn-cancel{background:var(--cancel-bg);color:#6b7280;padding:10px 20px;border-radius:10px;border:none;cursor:pointer;font-size:13px;font-weight:500;font-family:inherit}
-.btn-cancel:hover{background:#ebebef}
-.btn-ok{background:linear-gradient(135deg,var(--p1),var(--p2));color:#fff;padding:10px 20px;border-radius:10px;border:none;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit}
-.btn-ok:hover{box-shadow:0 4px 14px rgba(123,97,255,.25)}
-.suggest-card{background:var(--suggest-bg);border:1px solid var(--suggest-border);border-radius:14px;padding:16px;margin-bottom:10px}
-.suggest-card h4{font-size:12px;font-weight:600;color:var(--p1);margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px}
-.analysis-row{font-size:13px;color:#374151;margin-bottom:6px;line-height:1.6}
-.analysis-row b{color:var(--p1)}
-.analysis-tags{display:flex;flex-wrap:wrap;gap:5px;margin-top:4px}
-.analysis-tag{background:var(--tag-bg);color:var(--p1);font-size:11px;padding:3px 10px;border-radius:6px}
-.suggest-item{background:var(--suggest-bg);border:1px solid var(--suggest-border);border-radius:12px;padding:16px;margin-bottom:8px}
-.suggest-label{color:var(--p1);font-size:11px;font-weight:600;margin-bottom:5px}
-.suggest-text{color:var(--txt);font-size:14px;margin-bottom:4px}
-.suggest-reason{color:var(--muted);font-size:12px}
-.spin{display:inline-block;width:18px;height:18px;border:2px solid rgba(123,97,255,.2);border-top-color:var(--p1);border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:8px}
-@keyframes spin{to{transform:rotate(360deg)}}
-.footer{text-align:center;color:#B0B8C9;font-size:11px;margin-top:32px}
-@media(max-width:1100px){.layout{grid-template-columns:1fr!important}.settings-col,.contacts-col{display:none}}
-@media(max-width:768px){.stats{grid-template-columns:1fr;}.top-title{font-size:24px}}
-</style>
-</head>
-<body>
-<div class="wrap">
-
-<div class="top">
-  <div class="brand">
-    <div class="logo"></div>
-    <div><div class="top-title">微信监控面板</div><div class="top-sub">智能分析 · 档案管理</div></div>
-  </div>
-  <div style="display:flex;gap:10px;align-items:center">
-    <div class="gear glass" title="刷新面板" onclick="refresh()" style="width:52px;height:52px"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></div>
-    <div class="gear glass" id="themeToggle" title="切换主题" onclick="toggleTheme()" style="font-size:16px">
-      <svg id="iconMoon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-      <svg id="iconSun" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
-    </div>
-  </div>
-</div>
-
-<div class="glass status-bar">
-  <div class="status-left">
-    <div class="dot" id="statusDot"></div>
-    <span class="status-text" id="statusText">加载中...</span>
-    <span class="status-sub" id="statusSub"></span>
-  </div>
-  <button class="btn" id="toggleBtn" onclick="toggleMonitor()">加载中...</button>
-</div>
-
-<div class="layout">
-
-<div class="contacts-col" id="contactsCol">
-  <div class="contacts-toggle" onclick="toggleContacts()" title="展开/收起联系人">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-    <span>联系人</span>
-  </div>
-  <div class="glass panel">
-  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px"><h2 style="margin:0">监控联系人</h2><button class="collapse-btn" onclick="toggleContacts()" title="收起联系人"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button></div>
-  <input class="search" id="contactSearch" type="text" placeholder="搜索联系人..." oninput="renderProfilesWithFilter()">
-  <div class="contact-list" id="profileList"><div class="empty">加载中...</div></div>
-  <button class="btn-add" onclick="showAddModal()">+ 添加联系人</button>
-  </div>
-</div>
-
-<div class="main-col">
-  <div class="stats">
-    <div class="glass stat">
-      <div class="stat-title">监控人数</div>
-      <div class="stat-big" id="totalProfiles">-</div>
-    </div>
-    <div class="glass stat">
-      <div class="stat-title">今日更新</div>
-      <div class="stat-big" id="totalUpdates">-</div>
-    </div>
-    <div class="glass stat">
-      <div class="stat-title">运行时长</div>
-      <div class="stat-big" id="runningTime">-</div>
-    </div>
-  </div>
-
-  <div class="glass poll">
-    <h3>轮询间隔设置</h3>
-    <div class="poll-sub">AI 自动分析消息并更新档案</div>
-    <div class="interval-row">
-      <input class="interval-input" id="intervalInput" type="number" min="15" value="30" onchange="setIntervalVal()" onkeydown="if(event.key==='Enter')setIntervalVal()">
-      <span class="interval-unit">秒（最小 15）</span>
-    </div>
-  </div>
-
-  <div class="glass logs-card">
-    <h3>最近动态</h3>
-    <div class="log-scroll" id="logArea"><div class="empty">暂无动态</div></div>
-  </div>
-</div>
-
-<div class="settings-col" id="settingsCol">
-  <div class="settings-toggle" onclick="toggleSettings()" title="展开/收起设置">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
-    <span>设置</span>
-  </div>
-  <div class="glass settings-panel">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px"><h2 style="margin:0">设置中心</h2><button class="collapse-btn" onclick="toggleSettings()" title="收起设置"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></button></div>
-    <label>页面缩放</label>
-    <div class="zoom-row">
-      <input type="range" min="50" max="150" value="100" id="zoomSlider" oninput='document.getElementById("zoomVal").textContent=this.value+"%"' onmouseup="setZoom(this.value)" ontouchend="setZoom(this.value)">
-      <span class="zoom-val" id="zoomVal">100%</span>
-    </div>
-    <label>人物档案目录</label>
-    <input id="cfgProfilesDir" type="text" placeholder="从 Finder 拖拽文件夹" ondragover="event.preventDefault()" ondrop="event.preventDefault();const f=event.dataTransfer.files[0];if(f)this.value=f.path||f.name;">
-    <label>LLM 接口模式</label>
-    <select id="cfgLlmMode"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 格式</option></select>
-    <label>API 密钥</label>
-    <input id="cfgApiKey" type="password" placeholder="直接填写密钥">
-    <label>API 地址</label>
-    <input id="cfgApiBase" type="text">
-    <label>模型名</label>
-    <div style="display:flex;gap:8px;margin-bottom:12px">
-      <select id="cfgModel" style="flex:1"><option value="">— 请选择 —</option></select>
-      <button type="button" class="btn-fetch-models" id="fetchModelsBtn" onclick="fetchModels()" title="从当前 API 地址拉取模型列表">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-        <span>获取列表</span>
-      </button>
-    </div>
-    <button class="btn-save" id="saveBtn" onclick="saveSettings()">保存配置</button>
-    <div class="save-fb" id="saveFeedback"></div>
-    <hr style="border:none;border-top:1px solid var(--line);margin:18px 0">
-    <label>桌面通知</label>
-    <div class="toggle-row">
-      <label class="toggle-switch"><input type="checkbox" id="notifToggle" onchange="toggleNotif()"><span class="toggle-track"></span></label>
-      <span class="toggle-label">新消息时推送系统通知</span>
-    </div>
-    <label>排除会话</label>
-    <div class="chips" id="excludeChips"></div>
-    <div class="chip-input">
-      <input id="excludeInput" placeholder="输入会话名..." onkeydown="if(event.key==='Enter')addExclude()">
-      <button onclick="addExclude()">添加</button>
-    </div>
-  </div>
-</div>
-
-</div>
-
-<div class="footer">微信监控守护 · 智能分析 · 档案更新</div>
-</div>
-
-<div class="modal-mask" id="addModal">
-  <div class="modal-box">
-    <h3>添加监控联系人</h3>
-    <p style="color:var(--muted);font-size:13px;margin-bottom:14px;">输入对方的微信备注名即可</p>
-    <input id="contactInput" type="text" placeholder="输入微信备注名..." onkeydown="if(event.key==='Enter')addContact()" oninput="document.getElementById('confirmAddBtn').disabled=!this.value.trim()">
-    <div class="modal-foot">
-      <button class="btn-cancel" onclick="hideAddModal()">取消</button>
-      <button class="btn-ok" id="confirmAddBtn" onclick="addContact()" disabled>添加</button>
-    </div>
-  </div>
-</div>
-
-<div class="modal-mask" id="profileModal"><div class="modal-box" style="width:580px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column"><h3 id="profileTitle">档案</h3><div id="profileContent" style="flex:1;overflow-y:auto;max-height:60vh;"><div class="empty">加载中...</div></div><div class="modal-foot" style="margin-top:12px;"><button class="btn-cancel" onclick="document.getElementById('profileModal').classList.remove('open')">关闭</button></div></div></div>
-
-<div class="modal-mask" id="suggestModal">
-  <div class="modal-box" style="width:540px;max-width:92vw;">
-    <h3 id="suggestTitle">建议回复</h3>
-    <div id="suggestContent" style="max-height:500px;overflow-y:auto;"><div class="empty">加载中...</div></div>
-    <div class="modal-foot" style="margin-top:12px;">
-      <button class="btn-cancel" onclick="hideSuggestModal()">关闭</button>
-    </div>
-  </div>
-</div>
-
-<script>
-const API = "";
-let AUTH_TOKEN = "";
-let contactsData = {};
-let _ready = false;
-const _readyWaiters = [];
-
-(async function() {
-  try {
-    const resp = await fetch(API + "/api/public-token");
-    const data = await resp.json();
-    AUTH_TOKEN = data.token || "";
-  } catch(e) {}
-  _ready = true;
-  _readyWaiters.splice(0).forEach(function(fn){ try { fn(); } catch(e) {} });
-  if (typeof refresh === "function") refresh();
-})();
-
-function whenReady(fn) {
-  if (_ready) fn();
-  else _readyWaiters.push(fn);
-}
-
-function authHeaders() {
-  return AUTH_TOKEN ? {"Authorization": "Bearer " + AUTH_TOKEN} : {};
-}
-
-async function fetchStatus() {
-  const resp = await fetch(API + "/api/status", { headers: authHeaders() });
-  return await resp.json();
-}
-
-async function toggleMonitor() {
-  const btn = document.getElementById("toggleBtn");
-  btn.disabled = true;
-  const isRunning = btn.dataset.running === "true";
-  await fetch(API + "/api/" + (isRunning ? "stop" : "start"), { method: "POST", headers: authHeaders() });
-  btn.disabled = false;
-  refresh();
-}
-
-function showAddModal() {
-  document.getElementById("addModal").classList.add("open");
-  document.getElementById("contactInput").value = "";
-  document.getElementById("contactInput").focus();
-  document.getElementById("confirmAddBtn").disabled = true;
-}
-function hideAddModal() { document.getElementById("addModal").classList.remove("open"); }
-
-async function addContact() {
-  const chat = document.getElementById("contactInput").value.trim();
-  if (!chat) return;
-  const btn = document.getElementById("confirmAddBtn");
-  btn.disabled = true; btn.textContent = "添加中...";
-  try {
-    await fetch(API + "/api/add-contact", {
-      method: "POST",
-      headers: {"Content-Type": "application/json", ...authHeaders()},
-      body: JSON.stringify({chat})
-    });
-    contactsData[chat] = "";
-    hideAddModal(); refresh();
-  } catch(e) { alert("添加失败"); }
-  btn.textContent = "添加";
-}
-
-async function removeContact(chat) {
-  if (!confirm("取消监控「" + chat + "」？")) return;
-  try {
-    await fetch(API + "/api/remove-contact", {
-      method: "POST",
-      headers: {"Content-Type": "application/json", ...authHeaders()},
-      body: JSON.stringify({chat})
-    });
-    delete contactsData[chat]; refresh();
-  } catch(e) { alert("取消失败"); }
-}
-
-function renderLogs(logs) {
-  const area = document.getElementById("logArea");
-  if (!logs || !logs.length) { area.innerHTML = '<div class="empty">暂无动态</div>'; return; }
-  const atBot = area.scrollTop + area.clientHeight >= area.scrollHeight - 30;
-  area.innerHTML = logs.map(function(l) {
-    return '<div class="log"><span class="log-time">' + l.time + '</span><span class="log-level ' + l.level + '">' + l.level + '</span><span class="log-msg">' + escapeHtml(l.msg) + '</span></div>';
-  }).join("");
-  if (atBot) area.scrollTop = area.scrollHeight;
-}
-
-function _profColor(name) {
-  var h = 0;
-  for (var i = 0; i < name.length; i++) h = ((h << 5) - h + name.charCodeAt(i)) | 0;
-  var hue = Math.abs(h) % 360;
-  return "linear-gradient(135deg,hsl(" + hue + ",65%,62%),hsl(" + ((hue + 30) % 360) + ",55%,55%))";
-}
-
-function renderProfilesWithFilter() {
-  var q = (document.getElementById("contactSearch").value || "").toLowerCase();
-  var el = document.getElementById("profileList");
-  var contacts = window._lastProfileData && window._lastProfileData.monitored_contacts || [];
-  var profiles = window._lastProfileData && window._lastProfileData.profile_list || [];
-  var aliasMap = window._lastProfileData && window._lastProfileData.alias_map || {};
-  var filtered = q ? contacts.filter(function(c) { return c.toLowerCase().indexOf(q) !== -1; }) : contacts;
-  if (!filtered.length) { el.innerHTML = '<div class="empty">' + (q ? '未找到匹配的联系人' : '暂无监控联系人') + '</div>'; return; }
-  el.innerHTML = filtered.map(function(c) {
-    var has = profiles.indexOf(c) !== -1;
-    var aliases = aliasMap[c] || [];
-    var col = _profColor(c);
-    var aliasHtml = aliases.length ? '<span class="badge badge-alias">' + escapeHtml(aliases[0] + (aliases.length > 1 ? " +" + (aliases.length - 1) : "")) + '</span>' : "";
-    return '<div class="contact"><div class="contact-info">'
-      + '<div class="avatar" style="background:' + col + '">' + escapeHtml(c.charAt(0)) + '</div>'
-      + '<div><div class="contact-name" style="cursor:pointer" onclick="showProfile(\'' + escapeHtml(c).replace(/'/g, "\\'") + '\')">' + escapeHtml(c) + '</div>'
-      + '<div class="contact-meta">'
-      + (has ? '<span class="badge badge-profile">有档案</span>' : '<span class="badge badge-manual">手动</span>')
-      + aliasHtml + '</div></div></div>'
-      + '<div class="contact-acts">'
-      + '<button class="btn-sm btn-analyze" onclick="suggestReply(\'' + escapeHtml(c).replace(/'/g, "\\'") + '\',\'' + escapeHtml(contactsData[c] || "").replace(/'/g, "\\'") + '\')">💬 分析</button>'
-      + '<button class="btn-rm" onclick="removeContact(\'' + escapeHtml(c).replace(/'/g, "\\'") + '\')" title="取消监控">✕</button>'
-      + '</div></div>';
-  }).join("");
-}
-
-function escapeHtml(t) { var d = document.createElement("div"); d.textContent = t; return d.innerHTML; }
-
-async function suggestReply(chat, username) {
-  document.getElementById("suggestTitle").textContent = chat + " — 对话分析";
-  var sc = document.getElementById("suggestContent");
-  sc.innerHTML = '<div class="empty" style="padding:40px 0;"><div class="spin"></div>分析中<span id="sgElapsed"></span>...</div>';
-  var t0 = Date.now();
-  var timer = setInterval(function(){
-    var el = document.getElementById("sgElapsed");
-    if (el) el.textContent = "（" + Math.floor((Date.now()-t0)/1000) + "s）";
-  }, 500);
-  document.getElementById("suggestModal").classList.add("open");
-  try {
-    var controller = new AbortController();
-    var tmo = setTimeout(function(){ controller.abort(); }, 60000);
-    var resp = await fetch(API + "/api/suggest-reply?chat=" + encodeURIComponent(chat) + "&username=" + encodeURIComponent(username), { headers: authHeaders(), signal: controller.signal });
-    clearTimeout(tmo); clearInterval(timer);
-    var data = await resp.json();
-    var html = "";
-    if (data.analysis && data.analysis.summary) {
-      html += '<div class="suggest-card"><h4>对话分析</h4>';
-      html += '<div class="analysis-row"><b>主题：</b>' + escapeHtml(data.analysis.summary) + '</div>';
-      if (data.analysis.tone) html += '<div class="analysis-row"><b>语气：</b>' + escapeHtml(data.analysis.tone) + '</div>';
-      if (data.analysis.key_points && data.analysis.key_points.length) {
-        html += '<div class="analysis-row"><b>关键信息：</b></div><div class="analysis-tags">';
-        data.analysis.key_points.forEach(function(p) { html += '<span class="analysis-tag">' + escapeHtml(p) + '</span>'; });
-        html += '</div>';
-      }
-      html += '</div>';
-    }
-    if (!data.suggestions || !data.suggestions.length) {
-      if (!html) html = '<div class="empty">暂无聊天记录</div>';
-    } else {
-      html += data.suggestions.map(function(s, i) {
-        return '<div class="suggest-item"><div class="suggest-label">建议 ' + (i+1) + '</div>'
-          + '<div class="suggest-text">' + escapeHtml(s.reply) + '</div>'
-          + '<div class="suggest-reason">' + escapeHtml(s.reason || "") + '</div></div>';
-      }).join("");
-    }
-    document.getElementById("suggestContent").innerHTML = html;
-  } catch(e) {
-    clearInterval(timer);
-    var msg = e.name === "AbortError" ? "分析超时（60s），请稍后重试" : "加载失败";
-    document.getElementById("suggestContent").innerHTML = '<div class="empty" style="color:#ef4444;">' + msg + '</div>';
-  }
-}
-function hideSuggestModal() { document.getElementById("suggestModal").classList.remove("open"); }
-
-async function setIntervalVal() {
-  var el = document.getElementById("intervalInput");
-  var v = parseInt(el.value) || 30; if (v < 15) { v = 15; el.value = 15; }
-  await fetch(API + "/api/set-interval", { method: "POST", headers: {"Content-Type":"application/json", ...authHeaders()}, body: JSON.stringify({interval:v}) });
-}
-
-async function loadConfig() {
-  try {
-    var r = await fetch(API+"/api/config",{headers:authHeaders()});
-    var c = await r.json();
-    document.getElementById("cfgProfilesDir").value = c.profiles_dir||"";
-    document.getElementById("cfgLlmMode").value = c.llm&&c.llm.mode||"openai";
-    document.getElementById("cfgApiKey").value = c.llm&&c.llm.api_key||"";
-    document.getElementById("cfgApiBase").value = c.llm&&c.llm.api_base||"";
-    var mname=(c.llm&&c.llm.model)||"";
-  var msel=document.getElementById("cfgModel");
-  if(mname&&!Array.from(msel.options).some(function(o){return o.value===mname})){
-    var opt=document.createElement("option");opt.value=mname;opt.textContent=mname;msel.insertBefore(opt,msel.firstChild.nextSibling);
-  }
-  msel.value=mname;
-  } catch(e) {}
-}
-
-async function saveSettings() {
-  var btn = document.getElementById("saveBtn");
-  var fb = document.getElementById("saveFeedback");
-  btn.disabled = true; btn.textContent = "保存中...";
-  try {
-    await fetch(API+"/api/config",{method:"POST",headers:{"Content-Type":"application/json",...authHeaders()},
-      body:JSON.stringify({profiles_dir:document.getElementById("cfgProfilesDir").value.trim(),llm:{
-        mode:document.getElementById("cfgLlmMode").value,api_key:document.getElementById("cfgApiKey").value,
-        api_base:document.getElementById("cfgApiBase").value.trim(),model:document.getElementById("cfgModel").value.trim()}})});
-    fb.textContent = "✓ 已保存";
-    setTimeout(function(){ fb.textContent = ""; }, 3000);
-    refresh();
-  } catch(e) { fb.textContent = "保存失败"; setTimeout(function(){ fb.textContent = ""; }, 3000); }
-  btn.disabled = false; btn.textContent = "保存配置";
-}
-
-async function refresh() {
-  try {
-    var d = await fetchStatus();
-    var dot = document.getElementById("statusDot");
-    var txt = document.getElementById("statusText");
-    var btn = document.getElementById("toggleBtn");
-    var sub = document.getElementById("statusSub");
-    if (d.running) {
-      dot.className="dot on"; txt.textContent="运行中"; sub.textContent="监控服务正常运行";
-      btn.textContent="停止监控"; btn.className="btn btn-stop"; btn.dataset.running="true";
-    } else {
-      dot.className="dot off"; txt.textContent="已停止"; sub.textContent="点击启动监控";
-      btn.textContent="启动监控"; btn.className="btn btn-start"; btn.dataset.running="false";
-    }
-    document.getElementById("totalProfiles").textContent = d.monitored_count || 0;
-    document.getElementById("totalUpdates").textContent = d.today_updates || 0;
-    document.getElementById("runningTime").textContent = d.running_time || "0m";
-    document.getElementById("intervalInput").value = d.poll_interval || 30;
-    renderLogs(d.logs);
-    window._lastProfileData = d;
-    renderProfilesWithFilter();
-  } catch(e) {
-    document.getElementById("statusDot").className="dot off";
-    document.getElementById("statusText").textContent="连接失败";
-    document.getElementById("statusSub").textContent="请检查服务是否运行";
-  }
-}
-
-var _evtSrc=null,_refTmr=null,_logRefreshTmr=null;
-function connectSSE() {
-  if(_evtSrc){try{_evtSrc.close();}catch(e){}}
-  _evtSrc=new EventSource(API+"/api/events");
-  _evtSrc.onmessage=function(e){try{var v=JSON.parse(e.data);
-    if(v.type==="new_message"){
-      refresh();
-      if(localStorage.getItem("notif")==="1" && "Notification" in window && Notification.permission==="granted"){
-        new Notification("微信新消息",{body:(v.chat||"")+" 发来新消息"});
-      }
-    } else if(v.type==="connected") refresh();
-    else if(v.type==="log_update"){if(_logRefreshTmr)clearTimeout(_logRefreshTmr);_logRefreshTmr=setTimeout(refresh,1500);}
-  }catch(err){}};
-  _evtSrc.onerror=function(){if(_evtSrc){try{_evtSrc.close();}catch(e){}}_evtSrc=null;if(_refTmr)clearTimeout(_refTmr);_refTmr=setTimeout(connectSSE,5000);};
-}
-
-whenReady(function(){ refresh(); loadConfig(); loadExclude(); });
-whenReady(function(){ connectSSE(); });
-whenReady(function(){ setInterval(refresh, 15000); });
-
-/* Settings toggle */
-function toggleSettings(){
-  var col=document.getElementById("settingsCol");
-  var collapsed=col.classList.toggle("collapsed");
-  document.documentElement.style.setProperty("--settings-w",collapsed?"48px":"320px");
-  localStorage.setItem("settingsCollapsed",collapsed?"1":"0");
-}
-
-/* === Fetch model list === */
-async function fetchModels(){
-  var btn=document.getElementById("fetchModelsBtn");
-  var sel=document.getElementById("cfgModel");
-  var currentVal=sel.value;
-  btn.classList.add("loading");
-  btn.disabled=true;
-  try{
-    var llm={
-      mode:document.getElementById("cfgLlmMode").value,
-      api_key:document.getElementById("cfgApiKey").value.trim(),
-      api_base:document.getElementById("cfgApiBase").value.trim()
-    };
-    var r=await fetch(API+"/api/models",{method:"POST",headers:{"Content-Type":"application/json",...authHeaders()},body:JSON.stringify({llm:llm})});
-    var d=await r.json();
-    if(!r.ok||d.error){alert("获取失败："+(d.error||r.statusText));return;}
-    var models=d.models||[];
-    if(!models.length){alert("接口返回的模型列表为空");return;}
-    sel.innerHTML='<option value="">— 请选择 —</option>'+models.map(function(m){return '<option value="'+escapeHtml(m)+'">'+escapeHtml(m)+'</option>'}).join("");
-    if(currentVal&&models.indexOf(currentVal)>=0) sel.value=currentVal;
-    btn.querySelector("span").textContent="已获取 "+models.length;
-    setTimeout(function(){btn.querySelector("span").textContent="获取列表"},3000);
-  }catch(e){
-    alert("请求出错："+e.message);
-  }finally{
-    btn.classList.remove("loading");
-    btn.disabled=false;
-  }
-}
-function toggleContacts(){
-  var col=document.getElementById("contactsCol");
-  var collapsed=col.classList.toggle("collapsed");
-  document.documentElement.style.setProperty("--contacts-w",collapsed?"48px":"370px");
-  localStorage.setItem("contactsCollapsed",collapsed?"1":"0");
-}
-(function(){
-  if(localStorage.getItem("settingsCollapsed")==="1"){
-    document.getElementById("settingsCol").classList.add("collapsed");
-    document.documentElement.style.setProperty("--settings-w","48px");
-  }
-  if(localStorage.getItem("contactsCollapsed")==="1"){
-    document.getElementById("contactsCol").classList.add("collapsed");
-    document.documentElement.style.setProperty("--contacts-w","48px");
-  }
-})();
-
-/* Page zoom */
-function setZoom(v){
-  document.body.style.zoom=v/100;
-  document.getElementById("zoomVal").textContent=v+"%";
-  localStorage.setItem("zoom",v);
-}
-(function(){
-  var z=localStorage.getItem("zoom")||"100";
-  document.body.style.zoom=Number(z)/100;
-  var sl=document.getElementById("zoomSlider");
-  var vl=document.getElementById("zoomVal");
-  if(sl){sl.value=z;vl.textContent=z+"%";}
-})();
-
-
-/* === Notifications === */
-function toggleNotif(){
-  var on=document.getElementById("notifToggle").checked;
-  localStorage.setItem("notif",on?"1":"0");
-  if(on && "Notification" in window && Notification.permission==="default") Notification.requestPermission();
-}
-(function(){if(localStorage.getItem("notif")==="1"){var t=document.getElementById("notifToggle");if(t)t.checked=true;}})();
-
-/* === Exclude Chats === */
-var _excludeList=[];
-async function loadExclude(){
-  try{var r=await fetch(API+"/api/exclude-chats",{headers:authHeaders()});var d=await r.json();_excludeList=d.exclude_chats||[];renderExclude();}catch(e){}
-}
-function renderExclude(){
-  var el=document.getElementById("excludeChips");
-  if(!_excludeList.length){el.innerHTML="<span style='font-size:12px;color:var(--muted)'>无</span>";return;}
-  el.innerHTML=_excludeList.map(function(c){return '<span class="chip">'+escapeHtml(c)+' <span class="chip-x" onclick="removeExclude(\''+escapeHtml(c).replace(/'/g,"\\'")+'\')">✕</span></span>';}).join("");
-}
-async function addExclude(){
-  var inp=document.getElementById("excludeInput");var v=inp.value.trim();if(!v)return;
-  if(_excludeList.indexOf(v)===-1)_excludeList.push(v);
-  inp.value="";
-  await fetch(API+"/api/exclude-chats",{method:"POST",headers:{"Content-Type":"application/json",...authHeaders()},body:JSON.stringify({exclude_chats:_excludeList})});
-  renderExclude();
-}
-async function removeExclude(c){
-  _excludeList=_excludeList.filter(function(x){return x!==c;});
-  await fetch(API+"/api/exclude-chats",{method:"POST",headers:{"Content-Type":"application/json",...authHeaders()},body:JSON.stringify({exclude_chats:_excludeList})});
-  renderExclude();
-}
-
-/* === Profile Preview === */
-async function showProfile(name){
-  console.log("showProfile called:", name);
-  document.getElementById("profileTitle").textContent=name+" — 人物档案";
-  var el=document.getElementById("profileContent");
-  el.innerHTML='<div class="empty">加载中...</div>';
-  document.getElementById("profileModal").classList.add("open");
-  try{
-    var r=await fetch(API+"/api/profile?name="+encodeURIComponent(name),{headers:authHeaders()});
-    console.log("profile response:", r.status);
-    var d=await r.json();
-    if(!d.exists){el.innerHTML='<div class="empty">未找到「'+escapeHtml(name)+'」的档案</div>';return;}
-    var md=d.content||"";
-    md=md.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-    md=md.replace(/^### (.+)$/gm,"<h3>$1</h3>").replace(/^## (.+)$/gm,"<h3>$1</h3>").replace(/^# (.+)$/gm,"<h1>$1</h1>");
-    md=md.replace(/\*\*(.+?)\*\*/g,"<b>$1</b>");
-    md=md.replace(/^---$/gm,"<hr>");
-    el.innerHTML='<div class="prof-md">'+md+'</div>';
-  }catch(e){el.innerHTML='<div class="empty">加载失败</div>';}
-}
-
-
-function toggleTheme() {
-  var isDark = document.documentElement.getAttribute("data-theme") === "dark";
-  document.documentElement.setAttribute("data-theme", isDark ? "light" : "dark");
-  localStorage.setItem("theme", isDark ? "light" : "dark");
-  document.getElementById("iconMoon").style.display = isDark ? "" : "none";
-  document.getElementById("iconSun").style.display = isDark ? "none" : "";
-}
-(function(){
-  var saved = localStorage.getItem("theme");
-  var prefer = window.matchMedia("(prefers-color-scheme:dark)").matches ? "dark" : "light";
-  var theme = saved || prefer;
-  document.documentElement.setAttribute("data-theme", theme);
-  if (theme === "dark") {
-    document.getElementById("iconMoon").style.display = "none";
-    document.getElementById("iconSun").style.display = "";
-  }
-})();
-</script>
-</body>
-</html>"""
+# UI 已拆分到 ui/ 目录下的 _head.py / _styles.py / _body.py / _app.py
+# 通过 ui/__init__.py 拼装成 HTML_PAGE 字符串。改 UI 不用动这块。
+from ui import HTML_PAGE  # noqa: E402
 
 
 # ===== 17. Entry Points =====
