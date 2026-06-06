@@ -1733,18 +1733,27 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
                 if chat in message_cache:
                     raw = list(message_cache[chat])
 
-            # 多账号合并
-            profile_path_for_chat = get_profile_for_chat(chat, username)
-            if profile_path_for_chat:
-                profile_name = os.path.splitext(os.path.basename(profile_path_for_chat))[0]
+            # 多账号合并：只在没有指定 username 时合并（分析整个联系人），
+            # 指定了 username 时只拉该账号的消息（分析单个账号）
+            if not username or username == chat:
+                profile_path_for_chat = get_profile_for_chat(chat, username)
+                if profile_path_for_chat:
+                    profile_name = os.path.splitext(os.path.basename(profile_path_for_chat))[0]
+                    with _state_lock:
+                        alias_names = profile_name_to_chat_names.get(profile_name, set())
+                    for alias in alias_names:
+                        if alias != chat:
+                            with _state_lock:
+                                cached = message_cache.get(alias, [])
+                            if cached:
+                                raw.extend(cached)
+            else:
+                # 指定了具体 username，只从缓存里找该账号的消息
                 with _state_lock:
-                    alias_names = profile_name_to_chat_names.get(profile_name, set())
-                for alias in alias_names:
-                    if alias != chat:
-                        with _state_lock:
-                            cached = message_cache.get(alias, [])
-                        if cached:
+                    for cache_key, cached in message_cache.items():
+                        if cached and any(isinstance(m, dict) and m.get("username") == username for m in cached):
                             raw.extend(cached)
+                            break
 
             # 缓存没有 → 从 wechat-cli 实时拉取（非阻塞拿锁，不卡界面）
             if not raw:
@@ -1765,7 +1774,14 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
             chat_text = "\n".join(formatted)
 
             result = _get_suggestions_and_analysis(chat, chat_text)
-            self._json({"chat": chat, **result})
+                        # 找到 username 对应的实际 chat 名
+            _actual_chat = chat
+            if username and username != chat:
+                for _c in all_contacts_cache:
+                    if _c.get("username") == username:
+                        _actual_chat = _c.get("chat", chat)
+                        break
+            self._json({"chat": _actual_chat, "username": username, **result})
 
         else:
             self._json({"error": "not found"}, 404)

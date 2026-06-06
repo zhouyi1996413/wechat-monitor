@@ -145,16 +145,25 @@ function updateLogFilter() {
   localStorage.setItem(_logFilterKey, JSON.stringify(checkedKw));
   if (window._lastLogs) renderLogs(window._lastLogs);
 }
-// 初始化 checkbox 状态 + 默认全选
+// 初始化 checkbox 状态
 (function() {
-  var filter = _getLogFilter() || _getDefaultFilter();
-  // 如果存储的比当前 checkbox 少（新增了类型），用默认
+  var filter = _getLogFilter();
   var allKw = _getDefaultFilter();
-  if (filter.length < allKw.length) filter = allKw;
+  if (!filter) {
+    // 首次加载（无 localStorage），全选
+    filter = allKw;
+  }
+  // 用存储的 filter 来决定每个 checkbox 的状态
+  // 不在 filter 里的 keyword = 用户取消了 / 新增的 checkbox
   document.querySelectorAll("#logFilterDropdown input[type='checkbox']").forEach(function(cb) {
     cb.checked = filter.indexOf(cb.dataset.kw) !== -1;
   });
-  localStorage.setItem(_logFilterKey, JSON.stringify(filter));
+  // 把当前状态写回 localStorage（补上新增的 checkbox，默认不勾选）
+  var currentState = [];
+  document.querySelectorAll("#logFilterDropdown input[type='checkbox']:checked").forEach(function(cb) {
+    currentState.push(cb.dataset.kw);
+  });
+  localStorage.setItem(_logFilterKey, JSON.stringify(currentState));
 })();
 
 function renderLogs(logs) {
@@ -474,7 +483,7 @@ function renderProfilesWithFilter() {
       return '<div class="sub-row" data-drag-contact="' + escapeHtml(c) + '" data-drag-user="' + escapeHtml(a.username) + '"><span class="drag-handle sub-drag-handle"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><circle cx="6" cy="4" r="1.2"/><circle cx="10" cy="4" r="1.2"/><circle cx="6" cy="8" r="1.2"/><circle cx="10" cy="8" r="1.2"/><circle cx="6" cy="12" r="1.2"/><circle cx="10" cy="12" r="1.2"/></svg></span>'
         + '<div class="sub-name" title="' + escapeHtml(titleText) + '">' + escapeHtml(displayLabel) + '</div>'
         + '<div class="sub-acts">'
-        + '<button class="btn-sm btn-analyze" onclick="suggestReply(\'' + escapeHtml(c).replace(/'/g, "\\'") + '\',\'' + escapeHtml(a.username) + '\')">'
+        + '<button class="btn-sm btn-analyze" onclick="suggestReply(\'' + escapeHtml(c).replace(/'/g, "\\'") + '\',\'' + escapeHtml(a.username) + '\',\'' + escapeHtml(a.chat || c) + '\')">'
         + '<svg viewBox="0 0 24 24"><path d="M3 17 l5 -6 l4 4 l8 -9"/><path d="M14 6 h6 v6"/></svg>分析</button>'
         + '</div></div>';
     }).join("");
@@ -508,8 +517,8 @@ function renderProfilesWithFilter() {
 
 function escapeHtml(t) { var d = document.createElement("div"); d.textContent = t; return d.innerHTML; }
 
-async function suggestReply(chat, username) {
-  document.getElementById("suggestTitle").textContent = chat + " — 对话分析";
+async function suggestReply(chat, username, displayName) {
+  document.getElementById("suggestTitle").textContent = (displayName || chat) + " — 对话分析";
   var sc = document.getElementById("suggestContent");
   sc.innerHTML = '<div class="empty" style="padding:40px 0;"><div class="spin"></div>分析中<span id="sgElapsed"></span>...</div>';
   var t0 = Date.now();
