@@ -96,7 +96,25 @@ BODY = r"""
   </div>
 
   <div class="glass logs-card">
-    <h3>最近动态</h3>
+    <div class="logs-head">
+      <h3>最近动态</h3>
+      <div class="log-filter-wrap">
+        <button class="log-filter-btn" onclick="toggleLogFilter()" title="筛选日志级别">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15 a1.65 1.65 0 0 0 .33 1.82 l.06.06 a2 2 0 0 1 0 2.83 2 2 0 0 1 -2.83 0 l-.06-.06 a1.65 1.65 0 0 0 -1.82-.33 1.65 1.65 0 0 0 -1 1.51V21 a2 2 0 0 1 -2 2 2 2 0 0 1 -2 -2v-.09 A1.65 1.65 0 0 0 9 19.4 a1.65 1.65 0 0 0 -1.82.33 l-.06.06 a2 2 0 0 1 -2.83 0 2 2 0 0 1 0 -2.83 l.06-.06 A1.65 1.65 0 0 0 4.68 15 a1.65 1.65 0 0 0 -1.51 -1 H3 a2 2 0 0 1 -2 -2 2 2 0 0 1 2 -2 h.09 A1.65 1.65 0 0 0 4.6 9 a1.65 1.65 0 0 0 -.33 -1.82 l-.06-.06 a2 2 0 0 1 0 -2.83 2 2 0 0 1 2.83 0 l.06.06 A1.65 1.65 0 0 0 9 4.68 a1.65 1.65 0 0 0 1 -1.51 V3 a2 2 0 0 1 2 -2 2 2 0 0 1 2 2 v.09 a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82 -.33 l.06-.06 a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83 l-.06.06 A1.65 1.65 0 0 0 19.4 9 a1.65 1.65 0 0 0 1.51 1 H21 a2 2 0 0 1 2 2 2 2 0 0 1 -2 2 h-.09 a1.65 1.65 0 0 0 -1.51 1z"/></svg>
+        </button>
+        <div class="log-filter-dropdown" id="logFilterDropdown">
+          <label class="log-filter-item"><input type="checkbox" checked data-kw="发来新消息" onchange="updateLogFilter()"> 新消息</label>
+          <label class="log-filter-item"><input type="checkbox" checked data-kw="db 文件变化" onchange="updateLogFilter()"> DB 变化</label>
+          <label class="log-filter-item"><input type="checkbox" checked data-kw="启动" onchange="updateLogFilter()"> 启动/停止</label>
+          <label class="log-filter-item"><input type="checkbox" checked data-kw="缓存" onchange="updateLogFilter()"> 缓存刷新</label>
+          <label class="log-filter-item"><input type="checkbox" checked data-kw="文件监控" onchange="updateLogFilter()"> 文件监控</label>
+          <label class="log-filter-item"><input type="checkbox" checked data-kw="模型" onchange="updateLogFilter()"> 模型拉取</label>
+          <label class="log-filter-item"><input type="checkbox" checked data-kw="Token" onchange="updateLogFilter()"> Token 信息</label>
+          <label class="log-filter-item"><input type="checkbox" checked data-kw="面板" onchange="updateLogFilter()"> 面板状态</label>
+          <label class="log-filter-item"><input type="checkbox" checked data-kw="错误\|异常\|失败\|超时" onchange="updateLogFilter()"> 错误/异常</label>
+        </div>
+      </div>
+    </div>
     <div class="log-scroll" id="logArea"><div class="empty">暂无动态</div></div>
   </div>
 </div>

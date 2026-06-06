@@ -76,12 +76,115 @@ async function removeContact(chat) {
   } catch(e) { alert("取消失败"); }
 }
 
+// 日志 emoji → SVG 图标映射（统一风格，去掉丑 emoji）
+var _logIconMap = [
+  ['📡', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="2.5"/><path d="M12 2 a10 10 0 0 1 0 20"/><path d="M12 6 a6 6 0 0 1 0 12"/></svg>'],
+  ['🔗', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>'],
+  ['🔑', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 2 l-5 5"/><circle cx="17.5" cy="6.5" r="4.5"/><path d="M3 9 l7 7"/><path d="M14 14 l-5 5"/></svg>'],
+  ['⏸', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>'],
+  ['▶️', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="5 3 19 12 5 21 5 3" fill="currentColor"/></svg>'],
+  ['🚀', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2 L12 14"/><polygon points="12 2 18 8 6 8 12 2"/></svg>'],
+  ['📋', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M9 2 v4"/><path d="M15 2 v4"/></svg>'],
+  ['📁', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19 a2 2 0 0 1 -2 2 H4 a2 2 0 0 1 -2 -2 V5 a2 2 0 0 1 2 -2 h5 l2 3 h9 a2 2 0 0 1 2 2 z"/></svg>'],
+  ['📦', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 16 V8 a2 2 0 0 0 -1 -1.73 l-7 -4 a2 2 0 0 0 -2 0 l-7 4 A2 2 0 0 0 3 8 v8 a2 2 0 0 0 1 1.73 l7 4 a2 2 0 0 0 2 0 l7 -4 A2 2 0 0 0 21 16 z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>'],
+  ['♻️', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="7 2 4 7 7 12"/><polyline points="17 2 20 7 17 12"/><path d="M4 7 h16 a4 4 0 0 1 0 8 h-2"/><path d="M20 17 h-16 a4 4 0 0 1 0 -8 h2"/></svg>'],
+  ['⏹', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>'],
+  ['✅', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#22b07d" stroke-width="2.5" stroke-linecap="round"><path d="M5 12 l5 5 l10 -10"/></svg>'],
+  ['🔄', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9 a9 9 0 0 1 14.85-3.36 L23 10 M1 14 l4.64 4.36 A9 9 0 0 0 20.49 15"/></svg>'],
+  ['⚠️', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round"><path d="M10.29 3.86 L1.82 18 a2 2 0 0 0 1.71 3 h16.94 a2 2 0 0 0 1.71 -3 L13.71 3.86 a2 2 0 0 0 -3.42 0 z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'],
+  ['❗', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="13"/><circle cx="12" cy="17" r="0.5" fill="#ef4444"/></svg>'],
+  ['⚙️', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15 a1.65 1.65 0 0 0 .33 1.82 l.06.06 a2 2 0 0 1 0 2.83 2 2 0 0 1 -2.83 0 l-.06-.06 a1.65 1.65 0 0 0 -1.82-.33 1.65 1.65 0 0 0 -1 1.51V21 a2 2 0 0 1 -4 0v-.09 A1.65 1.65 0 0 0 9 19.4 a1.65 1.65 0 0 0 -1.82.33 l-.06.06 a2 2 0 0 1 -2.83 -2.83 l.06-.06 A1.65 1.65 0 0 0 4.68 15 a1.65 1.65 0 0 0 -1.51 -1 H3 a2 2 0 0 1 0 -4 h.09 A1.65 1.65 0 0 0 4.6 9 a1.65 1.65 0 0 0 -.33 -1.82 l-.06-.06 a2 2 0 0 1 2.83 -2.83 l.06.06 A1.65 1.65 0 0 0 9 4.68 a1.65 1.65 0 0 0 1 -1.51 V3 a2 2 0 0 1 4 0 v.09 a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82 -.33 l.06-.06 a2 2 0 0 1 2.83 2.83 l-.06.06 A1.65 1.65 0 0 0 19.4 9 a1.65 1.65 0 0 0 1.51 1 H21 a2 2 0 0 1 0 4 h-.09 a1.65 1.65 0 0 0 -1.51 1z"/></svg>'],
+  ['➕', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#22b07d" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8 v8"/><path d="M8 12 h8"/></svg>'],
+  ['➖', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M8 12 h8"/></svg>'],
+  ['💬', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15 a2 2 0 0 1 -2 2 H7 l-4 4 V5 a2 2 0 0 1 2 -2 h14 a2 2 0 0 1 2 2 z"/></svg>'],
+  ['📝', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4 H4 a2 2 0 0 0 -2 2 v14 a2 2 0 0 0 2 2 h14 a2 2 0 0 0 2 -2 v-7"/><path d="M18.5 2.5 a2.121 2.121 0 0 1 3 3 L12 15 l-4 1 1 -4 9.5 -9.5z"/></svg>'],
+  ['🔁', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11 V9 a4 4 0 0 1 4 -4 h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13 v2 a4 4 0 0 1 -4 4 H3"/></svg>'],
+  ['🔍', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>'],
+  ['🗑️', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6 v14 a2 2 0 0 1 -2 2 H7 a2 2 0 0 1 -2 -2 V6 m3 0 V4 a2 2 0 0 1 2 -2 h4 a2 2 0 0 1 2 2 v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>'],
+  ['📂', '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19 a2 2 0 0 1 -2 2 H4 a2 2 0 0 1 -2 -2 V5 a2 2 0 0 1 2 -2 h5 l2 3 h9 a2 2 0 0 1 2 2 z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>'],
+];
+var _logIconRe = new RegExp(_logIconMap.map(function(p){return p[0]}).join('|'), 'g');
+
+function _replaceLogIcons(msg) {
+  return msg.replace(_logIconRe, function(m) {
+    for (var i = 0; i < _logIconMap.length; i++) {
+      if (_logIconMap[i][0] === m) return '<span class="log-icon">' + _logIconMap[i][1] + '</span>';
+    }
+    return m;
+  });
+}
+
+// 日志消息类型筛选（持久化到 localStorage）
+var _logFilterKey = "wechat_monitor_log_filter";
+// 每个 checkbox 的 data-kw 是匹配关键词（用 | 分隔多个关键词）
+function _getLogFilter() {
+  try { return JSON.parse(localStorage.getItem(_logFilterKey)); } catch(e) { return null; }
+}
+function _getDefaultFilter() {
+  var kw = [];
+  document.querySelectorAll("#logFilterDropdown input[type='checkbox']").forEach(function(cb) {
+    kw.push(cb.dataset.kw);
+  });
+  return kw;
+}
+function toggleLogFilter() {
+  var dd = document.getElementById("logFilterDropdown");
+  if (dd) dd.classList.toggle("open");
+}
+// 点击外部关闭
+document.addEventListener("click", function(e) {
+  var dd = document.getElementById("logFilterDropdown");
+  var btn = e.target.closest && e.target.closest(".log-filter-btn");
+  if (dd && !btn && !dd.contains(e.target)) dd.classList.remove("open");
+});
+function updateLogFilter() {
+  var checkedKw = [];
+  document.querySelectorAll("#logFilterDropdown input[type='checkbox']").forEach(function(cb) {
+    if (cb.checked) checkedKw.push(cb.dataset.kw);
+  });
+  localStorage.setItem(_logFilterKey, JSON.stringify(checkedKw));
+  if (window._lastLogs) renderLogs(window._lastLogs);
+}
+// 初始化 checkbox 状态 + 默认全选
+(function() {
+  var filter = _getLogFilter() || _getDefaultFilter();
+  // 如果存储的比当前 checkbox 少（新增了类型），用默认
+  var allKw = _getDefaultFilter();
+  if (filter.length < allKw.length) filter = allKw;
+  document.querySelectorAll("#logFilterDropdown input[type='checkbox']").forEach(function(cb) {
+    cb.checked = filter.indexOf(cb.dataset.kw) !== -1;
+  });
+  localStorage.setItem(_logFilterKey, JSON.stringify(filter));
+})();
+
 function renderLogs(logs) {
+  window._lastLogs = logs;  // 保存完整数据供筛选用
+  var activeKws = _getLogFilter() || _getDefaultFilter();
+  // 构建"被排除的关键词"集合：所有 filter 项的关键词
+  // 只有当消息匹配某个被取消勾选的 filter 时才隐藏
+  var allKws = _getDefaultFilter();
+  var excludedKws = [];
+  for (var i = 0; i < allKws.length; i++) {
+    if (activeKws.indexOf(allKws[i]) === -1) {
+      // 这个 filter 被取消了，它的关键词要排除
+      excludedKws = excludedKws.concat(allKws[i].split("|"));
+    }
+  }
+  var filtered = (logs || []).filter(function(l) {
+    // 如果消息匹配任何被排除的关键词，隐藏
+    for (var j = 0; j < excludedKws.length; j++) {
+      if (l.msg && l.msg.indexOf(excludedKws[j]) !== -1) return false;
+    }
+    return true;  // 默认显示（未匹配到任何排除关键词）
+  });
   const area = document.getElementById("logArea");
-  if (!logs || !logs.length) { area.innerHTML = '<div class="empty">暂无动态</div>'; return; }
+  if (!filtered.length) { area.innerHTML = '<div class="empty">暂无动态</div>'; return; }
   const atBot = area.scrollTop + area.clientHeight >= area.scrollHeight - 30;
-  area.innerHTML = logs.map(function(l) {
-    return '<div class="log"><span class="log-time">' + l.time + '</span><span class="log-level ' + l.level + '">' + l.level + '</span><span class="log-msg">' + escapeHtml(l.msg) + '</span></div>';
+  area.innerHTML = filtered.map(function(l) {
+    var msg = escapeHtml(l.msg);
+    // 用 SVG 图标替换丑 emoji
+    msg = _replaceLogIcons(msg);
+    return '<div class="log"><span class="log-time">' + l.time + '</span><span class="log-level ' + l.level + '">' + l.level + '</span><span class="log-msg">' + msg + '</span></div>';
   }).join("");
   if (atBot) area.scrollTop = area.scrollHeight;
 }
@@ -116,6 +219,198 @@ function cssEscape(s) {
   return String(s).replace(/["\\]/g, "\\$&");
 }
 
+// 联系人拖拽排序（存 localStorage，后端同步到 state.json）
+var _dragKey = "wechat_monitor_contact_order";
+function _getContactOrder() {
+  try { return JSON.parse(localStorage.getItem(_dragKey)) || []; } catch(e) { return []; }
+}
+function _saveContactOrder(order) {
+  localStorage.setItem(_dragKey, JSON.stringify(order));
+  // 同步到后端
+  fetch(API + "/api/contact-order", {
+    method: "POST",
+    headers: Object.assign(authHeaders(), {"Content-Type":"application/json"}),
+    body: JSON.stringify({order: order})
+  }).catch(function(){});
+}
+function _sortContacts(contacts) {
+  var order = _getContactOrder();
+  if (!order.length) return contacts;
+  var orderMap = {};
+  order.forEach(function(name, i) { orderMap[name] = i; });
+  return contacts.slice().sort(function(a, b) {
+    var ia = orderMap.hasOwnProperty(a) ? orderMap[a] : 9999;
+    var ib = orderMap.hasOwnProperty(b) ? orderMap[b] : 9999;
+    return ia - ib;
+  });
+}
+var _draggedContact = null;
+var _draggedType = null; // "main" 或 "sub"
+function _onDragStart(e, name, type) {
+  _draggedContact = name;
+  _draggedType = type || "main";
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", name);
+  var el = e.target.closest(".contact,.contact-group,.sub-row");
+  if (el) el.classList.add("dragging");
+}
+function _onDragEnd(e) {
+  var el = e.target.closest(".contact,.contact-group,.sub-row");
+  if (el) el.classList.remove("dragging");
+  document.querySelectorAll(".drag-over").forEach(function(x) { x.classList.remove("drag-over"); });
+  _draggedContact = null;
+}
+function _onDragOver(e, name) {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  // 只有同类型才能拖到对方上面
+  var target = e.target.closest(".contact,.contact-group");
+  if (!target) return;
+  document.querySelectorAll(".drag-over").forEach(function(x) { x.classList.remove("drag-over"); });
+  target.classList.add("drag-over");
+}
+function _onDrop(e, targetName) {
+  e.preventDefault();
+  document.querySelectorAll(".drag-over").forEach(function(x) { x.classList.remove("drag-over"); });
+  if (!_draggedContact || _draggedContact === targetName) return;
+  // 重排序
+  var contacts = window._lastProfileData && window._lastProfileData.monitored_contacts || [];
+  var idx1 = contacts.indexOf(_draggedContact);
+  var idx2 = contacts.indexOf(targetName);
+  if (idx1 === -1 || idx2 === -1) return;
+  contacts.splice(idx1, 1);
+  contacts.splice(idx2, 0, _draggedContact);
+  // 保存并重新渲染
+  _saveContactOrder(contacts);
+  window._lastProfileData.monitored_contacts = contacts;
+  renderProfilesWithFilter();
+}
+
+
+// ===== 拖拽排序（mousedown/mousemove/mouseup，不用 HTML5 drag API）=====
+var _dragState = null; // {type, contact, username, startY, startY, placeholder, original}
+(function(){
+  var list = document.getElementById("profileList");
+  if (!list) return;
+
+  list.addEventListener("mousedown", function(e) {
+    var handle = e.target.closest(".drag-handle");
+    if (!handle) return;
+    e.preventDefault();
+    var subRow = handle.closest(".sub-row");
+    var contactEl = handle.closest(".contact,.contact-group");
+    var type = subRow ? "sub" : "main";
+    var contact = subRow ? subRow.dataset.dragContact : (handle.dataset.dragContact || "");
+    var username = subRow ? subRow.dataset.dragUser : null;
+
+    // 找到要移动的元素
+    var movable = subRow || contactEl;
+    if (!movable) return;
+
+    // 创建占位符
+    var placeholder = document.createElement("div");
+    placeholder.className = "drag-placeholder";
+    placeholder.style.height = movable.offsetHeight + "px";
+
+    _dragState = {
+      type: type, contact: contact, username: username,
+      movable: movable, placeholder: placeholder,
+      startY: e.clientY, offsetY: 0, started: false
+    };
+
+    // 绑定 mousemove/mouseup
+    document.addEventListener("mousemove", _onMouseMove);
+    document.addEventListener("mouseup", _onMouseUp);
+  });
+
+  function _onMouseMove(e) {
+    if (!_dragState) return;
+    var dy = Math.abs(e.clientY - _dragState.startY);
+    // 5px threshold to distinguish click from drag
+    if (!_dragState.started && dy < 5) return;
+    if (!_dragState.started) {
+      _dragState.started = true;
+      _dragState.movable.classList.add("dragging");
+      // 插入占位符
+      _dragState.movable.parentNode.insertBefore(_dragState.placeholder, _dragState.movable);
+    }
+
+    // 找到当前鼠标下方的目标
+    _dragState.placeholder.style.display = "none";
+    var underEl = document.elementFromPoint(e.clientX, e.clientY);
+    _dragState.placeholder.style.display = "";
+    if (!underEl) return;
+
+    if (_dragState.type === "main") {
+      var target = underEl.closest(".contact,.contact-group");
+      if (target && target !== _dragState.movable && target !== _dragState.placeholder) {
+        // 在目标前面或后面插入占位符
+        var rect = target.getBoundingClientRect();
+        var mid = rect.top + rect.height / 2;
+        if (e.clientY < mid) {
+          target.parentNode.insertBefore(_dragState.placeholder, target);
+        } else {
+          target.parentNode.insertBefore(_dragState.placeholder, target.nextSibling);
+        }
+      }
+    } else {
+      var targetRow = underEl.closest(".sub-row");
+      if (targetRow && targetRow !== _dragState.movable && targetRow !== _dragState.placeholder) {
+        var rect = targetRow.getBoundingClientRect();
+        var mid = rect.top + rect.height / 2;
+        if (e.clientY < mid) {
+          targetRow.parentNode.insertBefore(_dragState.placeholder, targetRow);
+        } else {
+          targetRow.parentNode.insertBefore(_dragState.placeholder, targetRow.nextSibling);
+        }
+      }
+    }
+  }
+
+  function _onMouseUp(e) {
+    document.removeEventListener("mousemove", _onMouseMove);
+    document.removeEventListener("mouseup", _onMouseUp);
+    if (!_dragState) return;
+
+    if (_dragState.started) {
+      // 把移动的元素放到占位符的位置
+      _dragState.placeholder.parentNode.insertBefore(_dragState.movable, _dragState.placeholder);
+      _dragState.placeholder.remove();
+      _dragState.movable.classList.remove("dragging");
+
+      // 收集新顺序
+      if (_dragState.type === "main") {
+        var newOrder = [];
+        list.querySelectorAll(".contact,.contact-group").forEach(function(el) {
+          var h = el.querySelector(".drag-handle");
+          if (h && h.dataset.dragContact) newOrder.push(h.dataset.dragContact);
+        });
+        if (newOrder.length) {
+          _saveContactOrder(newOrder);
+          window._lastProfileData.monitored_contacts = newOrder;
+          renderProfilesWithFilter();
+        }
+      } else {
+        // 子账号顺序
+        var subKey = "wechat_monitor_sub_order_" + _dragState.contact;
+        var newOrder = [];
+        var container = _dragState.movable.parentNode;
+        container.querySelectorAll(".sub-row").forEach(function(row) {
+          if (row.dataset.dragUser) newOrder.push(row.dataset.dragUser);
+        });
+        if (newOrder.length) {
+          localStorage.setItem(subKey, JSON.stringify(newOrder));
+          fetch(API+"/api/contact_accounts",{method:"POST",headers:Object.assign(authHeaders(),{"Content-Type":"application/json"}),body:JSON.stringify({action:"set_sub_order",contact:_dragState.contact,order:newOrder})}).catch(function(){});
+          var contact = _dragState.contact;
+          _dragState = null;
+          showProfile(contact);
+          return;
+        }
+      }
+    }
+    _dragState = null;
+  }
+})();
 function renderProfilesWithFilter() {
   var q = (document.getElementById("contactSearch").value || "").toLowerCase();
   var el = document.getElementById("profileList");
@@ -123,6 +418,7 @@ function renderProfilesWithFilter() {
   var profiles = window._lastProfileData && window._lastProfileData.profile_list || [];
   var aliasMap = window._lastProfileData && window._lastProfileData.alias_map || {};
   var accountMap = window._lastProfileData && window._lastProfileData.contact_accounts || {};
+  contacts = _sortContacts(contacts);
   var filtered = q ? contacts.filter(function(c) { return c.toLowerCase().indexOf(q) !== -1; }) : contacts;
   if (!filtered.length) { el.innerHTML = '<div class="empty">' + (q ? '未找到匹配的联系人' : '暂无监控联系人') + '</div>'; return; }
   el.innerHTML = filtered.map(function(c) {
@@ -136,7 +432,9 @@ function renderProfilesWithFilter() {
 
     if (!multi) {
       // 单账号：原样式
-      return '<div class="contact"><div class="contact-info">'
+      var _sc = escapeHtml(c).replace(/'/g, "\\'");
+      var _dragHandle = '<span class="drag-handle" data-drag-contact="' + escapeHtml(c) + '" title="拖拽排序"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="5" r="1.5"/><circle cx="15" cy="5" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="19" r="1.5"/><circle cx="15" cy="19" r="1.5"/></svg></span>';
+      return '<div class="contact"><div class="contact-info">' + _dragHandle
         + '<div class="avatar" style="background:' + col + '">' + escapeHtml(c.charAt(0)) + '</div>'
         + '<div><div class="contact-name" style="cursor:pointer" onclick="showProfile(\'' + escapeHtml(c).replace(/'/g, "\\'") + '\')">' + escapeHtml(c) + '</div>'
         + '<div class="contact-meta">'
@@ -151,6 +449,20 @@ function renderProfilesWithFilter() {
     }
 
     // 多账号：主行 + 子分支。优先显示 label（用户改的"微信号"），回退到 username
+    // 应用 localStorage 里的子账号拖拽排序
+    var _subKey = "wechat_monitor_sub_order_" + c;
+    try {
+      var _subOrder = JSON.parse(localStorage.getItem(_subKey));
+      if (_subOrder && _subOrder.length) {
+        var _subOrderMap = {};
+        _subOrder.forEach(function(u, i) { _subOrderMap[u] = i; });
+        accounts = accounts.slice().sort(function(a, b) {
+          var ia = _subOrderMap.hasOwnProperty(a.username) ? _subOrderMap[a.username] : 9999;
+          var ib = _subOrderMap.hasOwnProperty(b.username) ? _subOrderMap[b.username] : 9999;
+          return ia - ib;
+        });
+      }
+    } catch(e) {}
     var subRows = accounts.map(function(a) {
       // 优先 label，其次 chat，最后 username
       var displayLabel = a.label || a.chat || a.username;
@@ -158,7 +470,8 @@ function renderProfilesWithFilter() {
       // 没 label 且是主账号时才加 (主账号)
       if (a.is_primary && !a.label) displayLabel += " (主账号)";
       var titleText = a.username + (a.label ? "  ·  " + a.label : "");
-      return '<div class="sub-row">'
+      var _subU = escapeHtml(a.username).replace(/'/g, "\\'");
+      return '<div class="sub-row" data-drag-contact="' + escapeHtml(c) + '" data-drag-user="' + escapeHtml(a.username) + '"><span class="drag-handle sub-drag-handle"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><circle cx="6" cy="4" r="1.2"/><circle cx="10" cy="4" r="1.2"/><circle cx="6" cy="8" r="1.2"/><circle cx="10" cy="8" r="1.2"/><circle cx="6" cy="12" r="1.2"/><circle cx="10" cy="12" r="1.2"/></svg></span>'
         + '<div class="sub-name" title="' + escapeHtml(titleText) + '">' + escapeHtml(displayLabel) + '</div>'
         + '<div class="sub-acts">'
         + '<button class="btn-sm btn-analyze" onclick="suggestReply(\'' + escapeHtml(c).replace(/'/g, "\\'") + '\',\'' + escapeHtml(a.username) + '\')">'
@@ -173,8 +486,11 @@ function renderProfilesWithFilter() {
     var expandBtn = '<button class="btn-sm btn-toggle" onclick="_toggleGroup(\'' + escapeHtml(c).replace(/'/g, "\\'") + '\')" title="' + expandLabel + '子账号">'
       + expandIcon + expandLabel + '</button>';
 
+    var _sc2 = escapeHtml(c).replace(/'/g, "\'");
+    var _dragHandle2 = '<span class="drag-handle" data-drag-contact="' + escapeHtml(c) + '" title="拖拽排序"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><circle cx="9" cy="5" r="1.5"/><circle cx="15" cy="5" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="19" r="1.5"/><circle cx="15" cy="19" r="1.5"/></svg></span>';
     return '<div class="contact-group has-sub ' + (expanded ? "expanded" : "") + '" data-group-chat="' + cssEscape(c) + '">'
       + '<div class="group-head"><div class="contact-info">'
+      + _dragHandle2
       + '<div class="avatar" style="background:' + col + '">' + escapeHtml(c.charAt(0)) + '</div>'
       + '<div><div class="contact-name" style="cursor:pointer" onclick="showProfile(\'' + escapeHtml(c).replace(/'/g, "\\'") + '\')">' + escapeHtml(c) + '<span class="acct-badge">' + accounts.length + ' 账号</span></div>'
       + '<div class="contact-meta">'
@@ -293,7 +609,15 @@ async function refresh() {
     }
     document.getElementById("totalProfiles").textContent = d.monitored_count || 0;
     document.getElementById("totalUpdates").textContent = d.today_updates || 0;
-    document.getElementById("runningTime").textContent = d.running_time || "0m";
+    document.getElementById("runningTime").textContent = d.running_time || "00:00:00";
+    // 从 running_time 字符串解析秒数，同步本地计时器
+    if (d.running_time) {
+      var parts = d.running_time.split(":");
+      if (parts.length === 3) {
+        _runningSec = parseInt(parts[0])*3600 + parseInt(parts[1])*60 + parseInt(parts[2]);
+        _startRunningTimer();
+      }
+    }
     document.getElementById("intervalInput").value = d.poll_interval || 30;
     renderLogs(d.logs);
     window._lastProfileData = d;
@@ -324,6 +648,23 @@ function connectSSE() {
 whenReady(function(){ refresh(); loadConfig(); loadExclude(); });
 whenReady(function(){ connectSSE(); });
 whenReady(function(){ setInterval(refresh, 15000); });
+// 本地 1 秒定时器：运行时长实时更新（不依赖 API）
+var _runningSec = 0;
+var _runningTimerStarted = false;
+function _startRunningTimer() {
+  if (_runningTimerStarted) return;
+  _runningTimerStarted = true;
+  setInterval(function() {
+    if (_runningSec > 0) {
+      _runningSec++;
+      var h = Math.floor(_runningSec / 3600);
+      var m = Math.floor((_runningSec % 3600) / 60);
+      var s = _runningSec % 60;
+      var el = document.getElementById("runningTime");
+      if (el) el.textContent = (h<10?"0":"")+h+":"+(m<10?"0":"")+m+":"+(s<10?"0":"")+s;
+    }
+  }, 1000);
+}
 
 /* Settings toggle */
 function toggleSettings(){
@@ -429,8 +770,7 @@ async function removeExclude(c){
 let _currentContact = null;
 
 async function showProfile(name){
-  console.log("showProfile called:", name);
-  _currentContact = name;
+    _currentContact = name;
   // 标题 + 头像
   document.getElementById("profileTitleText").textContent = name + " — 人物档案";
   var av = document.getElementById("profileAvatar");
@@ -475,6 +815,22 @@ async function showProfile(name){
 
 function renderAcctList(accounts) {
   var list = document.getElementById("acctList");
+  // 应用子账号拖拽排序（从 localStorage）
+  if (_currentContact && accounts.length > 1) {
+    var subKey = "wechat_monitor_sub_order_" + _currentContact;
+    try {
+      var subOrder = JSON.parse(localStorage.getItem(subKey));
+      if (subOrder && subOrder.length) {
+        var orderMap = {};
+        subOrder.forEach(function(u, i) { orderMap[u] = i; });
+        accounts = accounts.slice().sort(function(a, b) {
+          var ia = orderMap.hasOwnProperty(a.username) ? orderMap[a.username] : 9999;
+          var ib = orderMap.hasOwnProperty(b.username) ? orderMap[b.username] : 9999;
+          return ia - ib;
+        });
+      }
+    } catch(e) {}
+  }
   document.getElementById("acctCount").textContent = accounts.length;
   if (!accounts.length) {
     list.innerHTML = '<div class="acct-empty">还没有账号，点击右上角"添加"</div>';

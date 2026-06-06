@@ -1314,21 +1314,30 @@ def _get_running_time():
     """获取运行时长"""
     if not monitor_running:
         return "已停止"
+    # 优先读 start.txt，其次从 state.json 兜底
+    start_ts = None
     start_file = os.path.join(SCRIPT_DIR, "start.txt")
     if os.path.exists(start_file):
         try:
             with open(start_file) as _f:
                 start_ts = float(_f.read().strip())
-            elapsed = int(time.time() - start_ts)
-            if elapsed < 60:
-                return f"{elapsed}s"
-            elif elapsed < 3600:
-                return f"{elapsed // 60}m"
-            else:
-                return f"{elapsed // 3600}h{(elapsed % 3600) // 60}m"
         except Exception:
             pass
-    return "-"
+    if start_ts is None:
+        try:
+            with open(STATE_FILE) as _f:
+                _st = json.load(_f)
+                start_ts = _st.get("last_poll_time")
+        except Exception:
+            pass
+    if start_ts is None:
+        # 最后兜底：进程存活就显示"运行中"
+        return "运行中"
+    elapsed = int(time.time() - start_ts)
+    h = elapsed // 3600
+    m = (elapsed % 3600) // 60
+    s = elapsed % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def clear_chat_log(chat, date):
@@ -1479,6 +1488,7 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
                 "running_time": _get_running_time(),
                 "logs": recent_logs[-30:],
                 "alias_map": {str(k): list(v) for k, v in profile_identifiers.items()},
+                "contact_order": load_state().get("contact_order", []),
                 "contact_accounts": contact_accounts,
             })
 
@@ -1926,6 +1936,34 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
             save_state()
             self._json({"ok": True, "contact": _contact, "accounts": manual_accounts.get(_contact, [])})
 
+        elif path == "/api/sub-order":
+            body = _read_body()
+            if body is None:
+                return
+            contact = (body.get("contact") or "").strip()
+            order = body.get("order", [])
+            if contact and isinstance(order, list):
+                state = load_state()
+                state.setdefault("sub_orders", {})[contact] = order
+                save_state(state)
+                self._json({"ok": True})
+            else:
+                self._json({"error": "contact and order required"}, 400)
+
+        elif path == "/api/contact-order":
+            body = _read_body()
+            if body is None:
+                return
+            order = body.get("order", [])
+            if isinstance(order, list):
+                # 保存联系人顺序到 state.json
+                state = load_state()
+                state["contact_order"] = order
+                save_state(state)
+                self._json({"ok": True})
+            else:
+                self._json({"error": "order must be a list"}, 400)
+
         elif path == "/api/set-account-label":
             body = _read_body()
             if body is None:
@@ -2079,7 +2117,7 @@ def main():
     refresh_all_contacts()
     log(f"📡 监控面板启动，{len(profile_names)} 个档案，{len(all_contacts_cache)} 个微信会话")
     log(f"🔗 控制面板: http://localhost:{PORT}")
-    log(f"🔑 API Token: {API_TOKEN}")
+    log(f"🔑 API Token: {API_TOKEN[:4]}...{API_TOKEN[-4:]}  (已脱敏，完整 token 仅用于本地鉴权)")
     server = http.server.ThreadingHTTPServer(("127.0.0.1", PORT), MonitorHandler)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()

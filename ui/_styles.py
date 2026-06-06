@@ -42,7 +42,7 @@ body:after{width:320px;height:320px;right:-80px;top:60px;background:rgba(93,134,
 .contact-group{position:relative}
 .contact-group .group-head{padding:14px 0;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
 .contact-group .group-head:last-child{border-bottom:none}
-.contact-group.has-sub{border-bottom:1px solid var(--line);padding-bottom:6px;margin-bottom:6px}
+.contact-group.has-sub{border-bottom:1px solid var(--line)}
 .contact-group .caret{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;color:var(--muted);transition:transform .2s;cursor:pointer;flex-shrink:0;margin-right:2px}
 .contact-group.has-sub.expanded .caret{transform:rotate(90deg)}
 .contact-group .caret svg{width:14px;height:14px}
@@ -57,7 +57,7 @@ body:after{width:320px;height:320px;right:-80px;top:60px;background:rgba(93,134,
 .sub-row .btn-sm svg{width:11px;height:11px}
 
 /* 展开/折叠按钮（多账号右侧）和分析按钮同样的尺寸风格 */
-.btn-toggle{background:rgba(123,97,255,.08);color:var(--p1);border:1px solid transparent;display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-family:inherit;font-weight:500}
+.btn-toggle{background:rgba(123,97,255,.08);color:var(--p1);border:1px solid rgba(123,97,255,.2);display:inline-flex;align-items:center;gap:4px;cursor:pointer;font-family:inherit;font-weight:500}
 .btn-toggle:hover{background:rgba(123,97,255,.14)}
 .btn-toggle svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
 .sub-row .btn-rm{padding:4px}
@@ -124,14 +124,26 @@ body:after{width:320px;height:320px;right:-80px;top:60px;background:rgba(93,134,
 .log-scroll{flex:1;overflow-y:auto;max-height:380px}
 .log-scroll::-webkit-scrollbar{width:3px}
 .log-scroll::-webkit-scrollbar-thumb{background:rgba(123,97,255,.15);border-radius:2px}
+.logs-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.logs-head h3{margin-bottom:0}
+.log-filter-wrap{position:relative}
+.log-filter-btn{background:transparent;border:none;cursor:pointer;color:var(--muted);padding:4px;border-radius:6px;display:flex;align-items:center;transition:all .15s}
+.log-filter-btn:hover{color:var(--txt);background:var(--input-bg)}
+.log-filter-dropdown{display:none;position:absolute;right:0;top:100%;margin-top:4px;background:var(--modal-bg);border:1px solid var(--line);border-radius:10px;padding:6px 10px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:20;min-width:90px}
+.log-filter-dropdown.open{display:flex;flex-direction:column;gap:2px}
+.log-filter-item{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--txt);cursor:pointer;padding:3px 4px;border-radius:4px;transition:background .1s}
+.log-filter-item:hover{background:var(--input-bg)}
+.log-filter-item input[type="checkbox"]{accent-color:var(--p1);margin:0;width:14px;height:14px}
 .log{display:grid;grid-template-columns:72px 56px 1fr;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);font-size:12px;align-items:baseline}
 .log:last-child{border-bottom:none}
 .log-time{color:#B0B8C9;font-family:'SF Mono','Fira Code',monospace;font-size:11px}
 .log-level{padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600;text-align:center}
-.log-level.INFO{background:rgba(123,97,255,.1);color:var(--p1)}
-.log-level.WARN{background:rgba(251,191,36,.12);color:#d97706}
-.log-level.ERROR{background:rgba(248,113,113,.1);color:#ef4444}
+.log-level.info{background:rgba(123,97,255,.1);color:var(--p1)}
+.log-level.warn{background:rgba(251,191,36,.12);color:#d97706}
+.log-level.error{background:rgba(248,113,113,.1);color:#ef4444}
 .log-msg{color:#6b7280;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.log-icon{display:inline-flex;align-items:center;vertical-align:-2px;margin-right:3px;color:#94a3b8}
+.log-icon svg{flex-shrink:0}
 /* Settings collapsible */
 .settings-col{position:relative;transition:all .35s cubic-bezier(.4,0,.2,1)}
 .settings-col .settings-panel{transition:opacity .25s,transform .25s}
@@ -209,6 +221,15 @@ body:after{width:320px;height:320px;right:-80px;top:60px;background:rgba(93,134,
 .acct-act-btn:hover{border-color:var(--line);color:var(--txt);background:var(--input-bg)}
 .acct-act-btn.del:hover{color:#e35b6a;background:rgba(227,91,106,.08)}
 .acct-act-btn svg{width:13px;height:13px}
+/* 拖拽手柄 */
+.drag-handle{display:flex;align-items:center;justify-content:center;width:20px;height:20px;color:var(--muted);cursor:grab;flex-shrink:0;opacity:.5;transition:opacity .15s;margin-right:2px;border-radius:4px;user-select:none;-webkit-user-select:none}
+.drag-handle:hover{opacity:1;background:rgba(123,97,255,.06)}
+.drag-handle:active{cursor:grabbing}
+.sub-drag-handle{width:16px;height:16px;margin-right:0}
+.sub-drag-handle svg{width:12px;height:12px}
+/* 拖拽中 */
+.contact.dragging,.contact-group.dragging,.sub-row.dragging{opacity:.4}
+.drag-placeholder{border:2px dashed var(--p1);border-radius:12px;background:rgba(123,97,255,.04);margin:4px 0;transition:none}
 .acct-act-btn.ok{color:#22b07d}
 .acct-act-btn.ok:hover{color:#1e9768;background:rgba(34,176,125,.1)}
 .acct-act-btn.cancel{color:var(--muted)}
