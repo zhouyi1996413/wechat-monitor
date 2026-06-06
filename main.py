@@ -49,7 +49,7 @@ CALIBRATION_INTERVAL = 60         # 校准线程间隔（秒）
 CACHE_REFRESH_INTERVAL = 180      # 缓存主动刷新间隔（秒），保证 suggest-reply 即时可用
 CONSECUTIVE_FAILURE_BACKOFF = 600 # 连续失败后暂停轮询的时长（秒）
 WEBCOMMAND_TIMEOUT = 15           # 单次 wechat-cli 子进程超时（秒）
-WEBCOMMAND_LOCK_TIMEOUT = 10      # 单次 wechat-cli 锁超时（秒），耐心等主轮询/缓存刷新
+WEBCOMMAND_LOCK_TIMEOUT = 30      # 单次 wechat-cli 锁超时（秒），耐心等主轮询/缓存刷新
 STATE_SAVE_INTERVAL = 300          # 状态持久化间隔（秒）
 SSE_HEARTBEAT_INTERVAL = 10        # SSE 心跳间隔（秒）
 DB_DEBOUNCE_SECONDS = 1.0          # DB 文件变化防抖（秒）
@@ -1727,15 +1727,28 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
             if not username:
                 username = chat
 
-            # 优先用缓存
+            # 先用 username 解析出实际 chat 名（多账号时 chat 参数是父联系人名，不是子账号名）
+            _actual_chat = chat
+            if username:
+                for _c in all_contacts_cache:
+                    if _c.get("username") == username:
+                        _actual_chat = _c.get("chat", chat)
+                        break
+                if _actual_chat == chat and username != chat:
+                    with _state_lock:
+                        if username in message_cache:
+                            _actual_chat = username
+
+            # 优先用缓存（用 _actual_chat 查，不是 URL 上的 chat）
             raw = []
             with _state_lock:
-                if chat in message_cache:
-                    raw = list(message_cache[chat])
+                if _actual_chat in message_cache:
+                    raw = list(message_cache[_actual_chat])
 
             # 多账号合并：只在没有指定 username 时合并（分析整个联系人），
             # 指定了 username 时只拉该账号的消息（分析单个账号）
             if not username or username == chat:
+                # 没指定 username：按父联系人合并所有别名账号
                 profile_path_for_chat = get_profile_for_chat(chat, username)
                 if profile_path_for_chat:
                     profile_name = os.path.splitext(os.path.basename(profile_path_for_chat))[0]
@@ -1748,18 +1761,14 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
                             if cached:
                                 raw.extend(cached)
             else:
-                # 指定了具体 username，只从缓存里找该账号的消息
-                with _state_lock:
-                    for cache_key, cached in message_cache.items():
-                        if cached and any(isinstance(m, dict) and m.get("username") == username for m in cached):
-                            raw.extend(cached)
-                            break
+                # 指定了具体 username：上面 _actual_chat 已查过子账号缓存，不再合并父联系人
+                pass
 
             # 缓存没有 → 从 wechat-cli 实时拉取（非阻塞拿锁，不卡界面）
             if not raw:
                 raw = load_last_n_messages(username, limit=15)
                 if not raw:
-                    self._json({"chat": chat, "error": "暂无聊天记录", "suggestions": [], "analysis": None})
+                    self._json({"chat": _actual_chat, "error": "暂无聊天记录", "suggestions": [], "analysis": None})
                     return
 
             formatted = []
@@ -1773,14 +1782,8 @@ class MonitorHandler(http.server.BaseHTTPRequestHandler):
                     formatted.append(f"[{ts}] {sender}: {text}")
             chat_text = "\n".join(formatted)
 
-            result = _get_suggestions_and_analysis(chat, chat_text)
-                        # 找到 username 对应的实际 chat 名
-            _actual_chat = chat
-            if username and username != chat:
-                for _c in all_contacts_cache:
-                    if _c.get("username") == username:
-                        _actual_chat = _c.get("chat", chat)
-                        break
+            # LLM 也用 _actual_chat（告诉 LLM 这是和哪个具体微信号的聊天）
+            result = _get_suggestions_and_analysis(_actual_chat, chat_text)
             self._json({"chat": _actual_chat, "username": username, **result})
 
         else:
